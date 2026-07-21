@@ -13,8 +13,6 @@ import os
 import sys
 from datetime import timedelta
 from pathlib import Path
-import pymysql
-pymysql.install_as_MySQLdb()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -48,8 +46,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'rest_framework_simplejwt',
-    'users.apps.UserConfig',
-    'wordsite.apps.WordsiteConfig'
+    'apps.users.apps.UserConfig',
+    'apps.wordsite.apps.WordsiteConfig'
 
 ]
 
@@ -89,12 +87,12 @@ WSGI_APPLICATION = 'generate_report.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        # 'NAME': 'generate_report',
-        # 'USER': 'root',
-        # 'PASSWORD': '123456',
-        # 'HOST': 'localhost',
-        # 'PORT': '3306',
+        'ENGINE': 'django.db.backends.mysql',
+        'NAME': 'generate_report',
+        'USER': 'root',
+        'PASSWORD': '123456',
+        'HOST': 'localhost',
+        'PORT': '3306',
     }
 }
 
@@ -138,6 +136,13 @@ MEDIA_ROOT = BASE_DIR / 'media'
 MEDIA_URL = '/media/'
 REPORT_DOCX_DIR = 'reports/word'
 REPORT_TEMPLATE_PATH = BASE_DIR.parent / 'apps' / 'wordsite' / 'templates' / 'template-official.docx'
+DWG_CONVERTER_PATH = os.environ.get(
+    'DWG_CONVERTER_PATH',
+    r'C:\Program Files\ODA\ODAFileConverter 27.1.0\ODAFileConverter.exe',
+)
+DWG_CONVERTER_TIMEOUT = 120
+DWG_DXF_VERSION = 'ACAD2018'
+DWG_UPLOAD_MAX_SIZE = 50 * 1024 * 1024
 # AUTH_USER_MODEL = 'users.UserInfo'
 
 REST_FRAMEWORK = {

@@ -7,6 +7,7 @@ sys.path.append('./apps')
 def main():
     """Run administrative tasks."""
     # TODO: 修改项目名
+    os.environ['DJANGO_SETTINGS_MODULE'] = 'generate_report.settings.dev'
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'generate_report.settings.dev')
     try:
         from django.core.management import execute_from_command_line
