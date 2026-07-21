@@ -263,37 +263,22 @@ def _remap_model_binding(binding, id_map):
 
 
 def _combine_drawing_workspaces(drawing_results, report):
-    """Place independently parsed drawings in one CAD-like model space."""
+    """Keep each imported DWG in an independent, tab-local model space."""
     canvases = [parse_dwg_workspace._active_canvas(item["result"]["workspace"]) for item in drawing_results]
     if len(canvases) == 1:
         return drawing_results[0]["result"]["workspace"]
 
-    gap = 180
-    title_height = 0
-    column_count = len(canvases)
-    row_count = 1
-    column_widths = [0] * column_count
-    row_heights = [0] * row_count
-    for index, canvas in enumerate(canvases):
-        column = index % column_count
-        row = index // column_count
-        column_widths[column] = max(column_widths[column], int(canvas.get("boardWidth") or 1600))
-        row_heights[row] = max(row_heights[row], int(canvas.get("boardHeight") or 1280) + title_height)
-    column_offsets = []
-    cursor = gap
-    for width in column_widths:
-        column_offsets.append(cursor)
-        cursor += width + gap
-    row_offsets = []
-    cursor = gap
-    for height in row_heights:
-        row_offsets.append(cursor)
-        cursor += height + gap
+    # Do not place sheets next to each other.  Every tab is a complete DWG
+    # sheet with its own origin; only the IDs need to be merged for React
+    # state.  Side-by-side placement made a second sheet inherit an enormous
+    # x-offset and then get squeezed when any consumer fitted the whole board.
+    board_width = max(int(canvas.get("boardWidth") or 1600) for canvas in canvases)
+    board_height = max(int(canvas.get("boardHeight") or 1280) for canvas in canvases)
 
     combined = {
         "blocks": [],
-        "boardHeight": cursor,
-        "boardWidth": sum(column_widths) + gap * (column_count + 1),
+        "boardHeight": board_height,
+        "boardWidth": board_width,
         "nativePreviewChrome": {"fromImportedDwg": True, "hasLegend": True, "hasTitleBlock": True},
         "nextId": 1,
         "paths": [],
@@ -307,10 +292,6 @@ def _combine_drawing_workspaces(drawing_results, report):
     }
     next_id = 1
     for index, (item, canvas) in enumerate(zip(drawing_results, canvases)):
-        column = index % column_count
-        row = index // column_count
-        offset_x = column_offsets[column]
-        offset_y = row_offsets[row] + title_height
         source_items = [
             *(canvas.get("paths") or []),
             *(canvas.get("texts") or []),
@@ -327,29 +308,22 @@ def _combine_drawing_workspaces(drawing_results, report):
         group_id = f"drawing-{index + 1}"
         for path in copy.deepcopy(canvas.get("paths") or []):
             path["id"] = id_map[path["id"]]
-            path["points"] = [{**point, "x": point["x"] + offset_x, "y": point["y"] + offset_y} for point in path.get("points") or []]
             if path.get("polygonBasePoints"):
-                path["polygonBasePoints"] = [{**point, "x": point["x"] + offset_x, "y": point["y"] + offset_y} for point in path["polygonBasePoints"]]
+                path["polygonBasePoints"] = list(path["polygonBasePoints"])
             path["drawingId"] = group_id
             combined["paths"].append(path)
         for text in copy.deepcopy(canvas.get("texts") or []):
             text["id"] = id_map[text["id"]]
-            text["x"] = float(text.get("x") or 0) + offset_x
-            text["y"] = float(text.get("y") or 0) + offset_y
             text["boundTarget"] = _remap_model_binding(text.get("boundTarget"), id_map)
             text["drawingId"] = group_id
             combined["texts"].append(text)
         for block in copy.deepcopy(canvas.get("blocks") or []):
             block["id"] = id_map[block["id"]]
-            block["x"] = float(block.get("x") or 0) + offset_x
-            block["y"] = float(block.get("y") or 0) + offset_y
             block["parentBinding"] = _remap_model_binding(block.get("parentBinding"), id_map)
             block["drawingId"] = group_id
             combined["blocks"].append(block)
         for point in copy.deepcopy(canvas.get("testPoints") or []):
             point["id"] = id_map[point["id"]]
-            point["x"] = float(point.get("x") or 0) + offset_x
-            point["y"] = float(point.get("y") or 0) + offset_y
             point["binding"] = _remap_model_binding(point.get("binding"), id_map)
             point["placeBinding"] = _remap_model_binding(point.get("placeBinding"), id_map)
             for field in ("blockId", "reportBlockId", "visualTestPointId"):
@@ -363,8 +337,8 @@ def _combine_drawing_workspaces(drawing_results, report):
         combined["drawingGroups"].append({
             "id": group_id,
             "name": drawing_name,
-            "x": offset_x,
-            "y": offset_y,
+            "x": 0,
+            "y": 0,
             "width": int(canvas.get("boardWidth") or 1600),
             "height": int(canvas.get("boardHeight") or 1280),
             "imageName": str(item["image"].name or ""),
@@ -479,5 +453,4 @@ class ImportExistingReportView(APIView):
         except Exception:
             logger.exception("导入已有报告失败")
             raise ReportDataError(detail="已有报告解析失败，请检查 DOCX、DWG 和校对图片")
-
 

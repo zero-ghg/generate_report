@@ -294,6 +294,20 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         self.assertEqual(second["sourceElementIds"], [7])
         self.assertIsNone(outside)
 
+    def test_matches_compact_range_with_omitted_end_prefix(self):
+        texts = [{
+            "id": 8,
+            "importedSourceHandles": ["RANGE-D1-30"],
+            "text": "D1-30",
+            "x": 110,
+            "y": 80,
+        }]
+
+        self.assertIsNotNone(_match_marker_text("D1", {}, texts, []))
+        self.assertIsNotNone(_match_marker_text("D16", {}, texts, []))
+        self.assertIsNotNone(_match_marker_text("D30", {}, texts, []))
+        self.assertIsNone(_match_marker_text("D31", {}, texts, []))
+
     def test_imports_cad_range_as_one_visible_point_with_two_report_rows(self):
         document = ezdxf.new("R2018")
         document.modelspace().add_text("D55~D56", dxfattribs={"height": 2.5}).set_placement((20, 30))
@@ -311,7 +325,7 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         result = parse_dwg_workspace(stream.getvalue().encode("utf-8"), "range.dxf", binding_data)
         points = result["workspace"]["tabData"]["1"]["testPoints"]
 
-        self.assertEqual(points[0]["label"], "D55~D56")
+        self.assertEqual(points[0]["label"], "D55-D56")
         self.assertEqual(points[0]["reportMarkers"], ["D55", "D56"])
         self.assertFalse(points[0]["reportOnly"])
         self.assertEqual(points[0]["reportFields"]["measuredValue"], "0.01")
@@ -691,7 +705,7 @@ class DwgWorkspaceParserTests(SimpleTestCase):
 
         self.assertEqual([point["label"] for point in points], ["1", "2", "3"])
 
-    def test_declared_transition_range_does_not_create_prefixed_canvas_points(self):
+    def test_declared_transition_range_creates_one_special_visible_point(self):
         document = ezdxf.new("R2018")
         modelspace = document.modelspace()
         for index, label in enumerate(("1", "2", "3"), start=1):
@@ -712,16 +726,16 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         result = parse_dwg_workspace(stream.getvalue().encode("utf-8"), "sample.dxf", binding_data)
         canvas = result["workspace"]["tabData"]["1"]
 
-        self.assertEqual([point["label"] for point in canvas["testPoints"]], ["1", "2", "3"])
+        self.assertEqual([point["label"] for point in canvas["testPoints"]], ["D1-D3", "D2", "D3"])
+        self.assertEqual(canvas["testPoints"][0]["reportMarkers"], ["D1", "D2", "D3"])
+        self.assertTrue(canvas["testPoints"][0]["specialRange"])
+        self.assertTrue(canvas["testPoints"][1]["reportOnly"])
         self.assertEqual(
             [row["marker"] for row in canvas["reportTables"]["transition"]],
             ["D1", "D2", "D3"],
         )
-        self.assertEqual(result["stats"]["boundRows"], 0)
-        self.assertEqual(
-            [item["marker"] for item in result["unmatched"]],
-            ["D1", "D2", "D3"],
-        )
+        self.assertEqual(result["stats"]["boundRows"], 3)
+        self.assertEqual(result["unmatched"], [])
 
     def test_preserves_existing_workspace_point_position_and_binding(self):
         binding_data = {

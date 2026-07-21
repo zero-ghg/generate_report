@@ -56,6 +56,10 @@ def parse_formatted_report_docx(source):
     current_subproject = None
     current_measurement_kind = None
     current_place_name = None
+    # Word list numbering is often continued across several measurement
+    # tables.  Keep the counter for the entire document instead of restarting
+    # at D1/S1 for each page-sized table.
+    measurement_numbering_counters = {}
 
     for kind, item in blocks:
         if kind == "sdt":
@@ -116,7 +120,7 @@ def parse_formatted_report_docx(source):
         if current_section in report_tables:
             kind = "spd_test" if current_section == "spdTest" else current_section
             place_name = parse_measurement_place_name(table, kind)
-            rows = parse_measurement_table(table, kind)
+            rows = parse_measurement_table(table, kind, measurement_numbering_counters)
             for row in rows:
                 row["placeName"] = place_name or current_place_name or ""
             if place_name:
@@ -518,15 +522,15 @@ def parse_measurement_place_name(table, kind):
     return cell_text(table, 0, positions["name"])
 
 
-def parse_measurement_table(table, kind):
+def parse_measurement_table(table, kind, numbering_counters=None):
     if kind == "spd_test":
         return parse_spd_test_table(table)
-    return parse_standard_measurement_table(table, kind)
+    return parse_standard_measurement_table(table, kind, numbering_counters)
 
 
-def parse_standard_measurement_table(table, kind):
+def parse_standard_measurement_table(table, kind, numbering_counters=None):
     rows = []
-    numbering_counters = {}
+    numbering_counters = numbering_counters if numbering_counters is not None else {}
     first_data_row = 2
     last_row_index = len(table.rows) - 1
     if is_remark_table_row(table.rows[-1]):
