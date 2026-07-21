@@ -183,6 +183,8 @@ def _find_oda_converter():
         configured,
         shutil.which("ODAFileConverter.exe"),
         shutil.which("ODAFileConverter"),
+        Path("/Applications/ODAFileConverter.app/Contents/MacOS/ODAFileConverter"),
+        Path.home() / "Applications/ODAFileConverter.app/Contents/MacOS/ODAFileConverter",
         r"C:\Program Files\ODA\ODAFileConverter 27.1.0\ODAFileConverter.exe",
         r"C:\Program Files\ODA\ODAFileConverter 26.12.0\ODAFileConverter.exe",
         r"C:\Program Files\ODA\ODAFileConverter 25.12.0\ODAFileConverter.exe",
@@ -645,6 +647,7 @@ def _normalize_hatch_pattern_spacing(paths):
 
 
 def _normalize_canvas(parsed, width, height, target_area=None):
+    _discard_entities_outside_sheet_frame(parsed)
     min_x, min_y, max_x, max_y = _drawing_bounds_with_margin(parsed)
     source_width = max(max_x - min_x, 1.0)
     source_height = max(max_y - min_y, 1.0)
@@ -797,6 +800,16 @@ def _center_multiline_cell_texts(parsed):
 
 
 def _drawing_bounds(parsed):
+    # Reports generated from a common CAD template use four TRACE entities for
+    # the outer sheet frame.  Some exported DWGs also contain a stray hatch or
+    # construction marker far away from that frame.  Including the marker in
+    # the global min/max compresses the complete drawing into one side of the
+    # board (most visible with multi-DWG imports).  Prefer the explicit sheet
+    # frame when it is present; otherwise retain the generic entity bounds.
+    sheet_frame = _sheet_frame_bounds(parsed)
+    if sheet_frame:
+        return sheet_frame
+
     xs = []
     ys = []
     for path in parsed["paths"]:
@@ -809,6 +822,46 @@ def _drawing_bounds(parsed):
     if not xs or not ys:
         return 0.0, 0.0, 1600.0, 1280.0
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def _sheet_frame_bounds(parsed):
+    trace_points = [
+        point
+        for path in parsed["paths"]
+        if str(path.get("name") or "").upper() == "TRACE"
+        for point in path.get("points") or []
+    ]
+    if len(trace_points) < 8:
+        return None
+    trace_xs = [float(point["x"]) for point in trace_points]
+    trace_ys = [float(point["y"]) for point in trace_points]
+    min_x, max_x = min(trace_xs), max(trace_xs)
+    min_y, max_y = min(trace_ys), max(trace_ys)
+    if max_x - min_x <= 1 or max_y - min_y <= 1:
+        return None
+    return min_x, min_y, max_x, max_y
+
+
+def _discard_entities_outside_sheet_frame(parsed):
+    """Remove isolated CAD debris that sits far outside an explicit sheet frame."""
+    frame = _sheet_frame_bounds(parsed)
+    if not frame:
+        return
+    min_x, min_y, max_x, max_y = frame
+    padding = max(max_x - min_x, max_y - min_y) * 0.12
+    left, top = min_x - padding, min_y - padding
+    right, bottom = max_x + padding, max_y + padding
+
+    def inside(x, y):
+        return left <= float(x) <= right and top <= float(y) <= bottom
+
+    parsed["paths"] = [
+        path
+        for path in parsed["paths"]
+        if any(inside(point["x"], point["y"]) for point in path.get("points") or [])
+    ]
+    parsed["texts"] = [item for item in parsed["texts"] if inside(item.get("x", 0), item.get("y", 0))]
+    parsed["blocks"] = [item for item in parsed["blocks"] if inside(item.get("x", 0), item.get("y", 0))]
 
 
 def _drawing_bounds_with_margin(parsed):
@@ -973,7 +1026,15 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
                 "reportType": "",
             })
 
+    # A CAD annotation such as D100-D101 or D100-101 denotes one physical
+    # symbol serving a contiguous run of report markers.  Keep that symbol as
+    # one visible, special test point and retain its individual report rows as
+    # non-visual companions.
+    test_points = _collapse_declared_range_test_points(test_points, parsed.get("texts") or [])
     test_points = _collapse_paired_flange_test_points(test_points, parsed.get("paths") or [])
+
+    range_points = _declared_range_test_points(test_points, text_candidates, parsed["paths"], next_id)
+    test_points.extend(range_points)
 
     return {
         "testPoints": test_points,
@@ -982,6 +1043,129 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
         "boundRows": bound_rows,
         "nextId": next_id,
     }
+
+
+def _parse_marker_range(value):
+    """Return every marker in a compact CAD range, e.g. D1-30 or D1-D30."""
+    compact = re.sub(r"\s+", "", str(value or "")).upper()
+    match = re.fullmatch(r"([A-Z]?)(\d+)(?:-|－|—|~|～|至)([A-Z]?)(\d+)", compact)
+    if not match:
+        return None
+    start_prefix, start_text, end_prefix, end_text = match.groups()
+    end_prefix = end_prefix or start_prefix
+    if start_prefix != end_prefix:
+        return None
+    start, end = int(start_text), int(end_text)
+    # A marker range is a compact symbol label, never an unbounded numeric
+    # sequence.  Avoid treating arbitrary dimensions as thousands of points.
+    if abs(end - start) > 500:
+        return None
+    width = max(len(start_text), len(end_text)) if (start_text.startswith("0") or end_text.startswith("0")) else 1
+    return [f"{start_prefix}{str(number).zfill(width)}" for number in range(min(start, end), max(start, end) + 1)]
+
+
+def _marker_matches_report_type(marker, report_type):
+    """Keep prefixed CAD ranges bound to their corresponding Word table."""
+    prefix_match = re.match(r"\s*([A-Z])", str(marker or "").upper())
+    if not prefix_match:
+        return True
+    prefix = prefix_match.group(1)
+    if prefix == "D":
+        return report_type == "transition"
+    if prefix == "S":
+        # Both SPD detail and SPD test tables use S-prefixed CAD points.
+        return report_type in {"spd", "spdTest"}
+    return True
+
+
+def _compact_range_label(markers):
+    return f"{markers[0]}-{markers[-1]}" if len(markers) > 1 else markers[0]
+
+
+def _collapse_declared_range_test_points(test_points, texts):
+    """Collapse report rows attached to one explicit CAD range label."""
+    ranges = []
+    for text in texts:
+        markers = _parse_marker_range(text.get("text"))
+        if markers and text.get("id") is not None:
+            ranges.append((int(text["id"]), str(text.get("text") or "").strip(), markers))
+    if not ranges:
+        return test_points
+
+    consumed_ids = set()
+    result = []
+    for text_id, _display_label, range_markers in ranges:
+        marker_order = {marker: index for index, marker in enumerate(range_markers)}
+        members = [
+            point for point in test_points
+            if point.get("id") not in consumed_ids
+            and str(point.get("label") or "").strip() in marker_order
+            and _marker_matches_report_type(point.get("label"), point.get("reportType"))
+            and text_id in {int(item_id) for item_id in point.get("sourceElementIds") or [] if str(item_id).strip().isdigit()}
+        ]
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda point: marker_order[str(point.get("label") or "").strip()])
+        primary = members[0]
+        primary_marker = str(primary.get("label") or "").strip()
+        visible_point = {
+            **primary,
+            "label": _compact_range_label(range_markers),
+            "reportMarker": primary_marker,
+            "reportMarkers": range_markers,
+            "reportOnly": False,
+            "specialRange": True,
+        }
+        result.append(visible_point)
+        consumed_ids.add(primary.get("id"))
+        for member in members[1:]:
+            marker = str(member.get("label") or "").strip()
+            result.append({
+                **member,
+                "label": marker,
+                "reportMarker": marker,
+                "reportOnly": True,
+                "sourceElementIds": [],
+                "sourceHandles": [],
+                "visualTestPointId": primary.get("id"),
+            })
+            consumed_ids.add(member.get("id"))
+    return result + [point for point in test_points if point.get("id") not in consumed_ids]
+
+
+def _declared_range_test_points(existing_points, texts, paths, next_id):
+    """Expose range labels even when no Word table rows are available yet."""
+    points = []
+    represented_text_ids = {
+        int(item_id)
+        for point in existing_points
+        for item_id in point.get("sourceElementIds") or []
+        if str(item_id).strip().isdigit()
+    }
+    for text in texts:
+        markers = _parse_marker_range(text.get("text"))
+        if not markers or int(text.get("id") or 0) in represented_text_ids:
+            continue
+        target = _marker_target_from_text(text, paths)
+        points.append({
+            "id": next_id,
+            "label": _compact_range_label(markers),
+            "reportMarker": markers[0],
+            "reportMarkers": markers,
+            "specialRange": True,
+            "imported": True,
+            "side": target.get("side") or "right",
+            "sourceElementIds": target.get("sourceElementIds") or [],
+            "sourceHandles": target.get("sourceHandles") or [],
+            "size": target.get("size") or 0.38,
+            "x": target["x"],
+            "y": target["y"],
+            "binding": {"id": text["id"], "kind": "text"},
+            "reportFields": {},
+            "reportType": "",
+        })
+        next_id += 1
+    return points
 
 
 def _collapse_paired_flange_test_points(test_points, paths):
@@ -1252,7 +1436,10 @@ def _match_marker_text(marker, row, texts, paths):
 def _marker_is_in_text_range(marker, text_value):
     """Match one report marker against a CAD range label such as D55~D56."""
     marker_match = re.fullmatch(r"([A-Z]?)(\d+)", marker)
-    range_match = re.fullmatch(r"([A-Z]?)(\d+)(?:~|～)([A-Z]?)(\d+)", text_value)
+    # DXF text is often split onto separate lines.  Once whitespace is
+    # removed, a visible range such as ``D1\n-D\n12`` becomes ``D1-D12``.
+    # Treat its hyphen as the range separator as well as the CAD tilde forms.
+    range_match = re.fullmatch(r"([A-Z]?)(\d+)(?:~|～|-)([A-Z]?)(\d+)", text_value)
     if not marker_match or not range_match:
         return False
     marker_prefix, marker_number = marker_match.group(1), int(marker_match.group(2))
@@ -1269,6 +1456,11 @@ def _marker_target_from_text(text, paths):
     """将编号文字吸附到附近的小型填充标记；找不到时保留文字坐标。"""
     text_x = float(text.get("x") or 0)
     text_y = float(text.get("y") or 0)
+    # Range labels (D100-D101) are often printed to the left of a vertical
+    # equipment bank, so their original CAD arrow is farther away than a
+    # regular single-point label.  Keep the tight radius for normal markers;
+    # only give explicit ranges enough reach to claim their existing triangle.
+    marker_distance_limit = 72 if _parse_marker_range(text.get("text")) else 30
     candidates = []
     for path in paths:
         marker_name = str(path.get("name") or "").upper()
@@ -1286,7 +1478,7 @@ def _marker_target_from_text(text, paths):
         center_x = (min(xs) + max(xs)) / 2
         center_y = (min(ys) + max(ys)) / 2
         distance = math.hypot(center_x - text_x, center_y - text_y)
-        if distance <= 30:
+        if distance <= marker_distance_limit:
             candidates.append((distance, center_x, center_y, path, {
                 "x": min(xs),
                 "y": min(ys),
@@ -1306,22 +1498,29 @@ def _marker_target_from_text(text, paths):
         marker_parts.append(candidate)
         combined_box = _union_boxes(combined_box, candidate_box)
 
-    # Filled HATCH geometry is the marker anchor, but many CAD blocks also
-    # contain an outline around that fill. Include only geometrically adjacent
-    # small paths by id; grouping every entity with the same INSERT handle can
-    # accidentally pull unrelated drawing geometry into the marker.
+    # Keep adjacent filled triangles together, but never absorb ordinary
+    # equipment geometry.  A valve is commonly two black triangles plus a
+    # circle: only the triangles are test-point arrows; the circle and its
+    # surrounding frame must remain independent editable paths.
     marker_ids = {int(part.get("id") or 0) for part in marker_parts}
     max_part_width = max(combined_box["width"] * 2.5, 24)
     max_part_height = max(combined_box["height"] * 2.5, 24)
     tolerance = max(min(combined_box["width"], combined_box["height"]) * 0.2, 1)
     for path in paths:
         path_id = int(path.get("id") or 0)
-        if path_id in marker_ids:
+        marker_name = str(path.get("name") or "").upper()
+        path_points = path.get("points") or []
+        if (
+            path_id in marker_ids
+            or marker_name not in {"HATCH", "POINT", "SOLID", "TRACE"}
+            or not path.get("closed")
+            or len(path_points) < 3
+            or len(path_points) > 5
+        ):
             continue
         path_box = _path_box(path)
         if (
-            path.get("closed")
-            and path_box["width"] <= max_part_width
+            path_box["width"] <= max_part_width
             and path_box["height"] <= max_part_height
             and _boxes_touch(combined_box, path_box, tolerance)
         ):
