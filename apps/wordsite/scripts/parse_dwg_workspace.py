@@ -78,6 +78,7 @@ def parse_dwg_workspace(
         height,
     )
     _assign_interaction_groups(parsed, binding_result["testPoints"])
+    _assign_sheet_frame_interaction_group(parsed)
 
     canvas = {
         "blocks": parsed["blocks"],
@@ -1322,6 +1323,66 @@ def _assign_interaction_groups(parsed, test_points):
         for item in members:
             item["interactionGroupId"] = group_id
         point["interactionGroupId"] = group_id
+
+
+def _assign_sheet_frame_interaction_group(parsed):
+    """Make the four TRACE strips of a CAD sheet border one selectable object.
+
+    ODA exports the outer drawing frame as four thin, closed TRACE polygons,
+    not four LINE entities.  They therefore never entered the previous marker
+    grouping flow and reached the browser as four unrelated objects.
+    """
+    trace_paths = [
+        path for path in parsed.get("paths") or []
+        if str(path.get("name") or "").upper() == "TRACE" and len(path.get("points") or []) >= 3
+    ]
+    if len(trace_paths) < 4:
+        return
+
+    frame = _sheet_frame_bounds({"paths": trace_paths})
+    if not frame:
+        return
+    left, top, right, bottom = frame
+    frame_width = right - left
+    frame_height = bottom - top
+    tolerance = max(max(frame_width, frame_height) * 0.006, 1.5)
+
+    def bounds(path):
+        points = path.get("points") or []
+        xs = [float(point["x"]) for point in points]
+        ys = [float(point["y"]) for point in points]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    top_edges = []
+    bottom_edges = []
+    left_edges = []
+    right_edges = []
+    for path in trace_paths:
+        x1, y1, x2, y2 = bounds(path)
+        width, height = x2 - x1, y2 - y1
+        if width >= frame_width * 0.72 and height <= max(tolerance * 3, frame_height * 0.035):
+            if abs(y1 - top) <= tolerance * 2:
+                top_edges.append(path)
+            if abs(y2 - bottom) <= tolerance * 2:
+                bottom_edges.append(path)
+        if height >= frame_height * 0.72 and width <= max(tolerance * 3, frame_width * 0.035):
+            if abs(x1 - left) <= tolerance * 2:
+                left_edges.append(path)
+            if abs(x2 - right) <= tolerance * 2:
+                right_edges.append(path)
+
+    edges = [
+        max(top_edges, key=lambda item: bounds(item)[2] - bounds(item)[0], default=None),
+        max(bottom_edges, key=lambda item: bounds(item)[2] - bounds(item)[0], default=None),
+        max(left_edges, key=lambda item: bounds(item)[3] - bounds(item)[1], default=None),
+        max(right_edges, key=lambda item: bounds(item)[3] - bounds(item)[1], default=None),
+    ]
+    if any(edge is None for edge in edges) or len({id(edge) for edge in edges}) != 4:
+        return
+    group_id = "cad-sheet-frame-" + "-".join(str(edge.get("id")) for edge in edges)
+    for edge in edges:
+        edge["interactionGroupId"] = group_id
+        edge["locked"] = False
 
 
 def _infer_missing_report_markers(report_tables, texts):

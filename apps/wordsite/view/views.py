@@ -310,16 +310,22 @@ def _combine_drawing_workspaces(drawing_results, report):
             path["id"] = id_map[path["id"]]
             if path.get("polygonBasePoints"):
                 path["polygonBasePoints"] = list(path["polygonBasePoints"])
+            if path.get("interactionGroupId"):
+                path["interactionGroupId"] = f"{group_id}:{path['interactionGroupId']}"
             path["drawingId"] = group_id
             combined["paths"].append(path)
         for text in copy.deepcopy(canvas.get("texts") or []):
             text["id"] = id_map[text["id"]]
             text["boundTarget"] = _remap_model_binding(text.get("boundTarget"), id_map)
+            if text.get("interactionGroupId"):
+                text["interactionGroupId"] = f"{group_id}:{text['interactionGroupId']}"
             text["drawingId"] = group_id
             combined["texts"].append(text)
         for block in copy.deepcopy(canvas.get("blocks") or []):
             block["id"] = id_map[block["id"]]
             block["parentBinding"] = _remap_model_binding(block.get("parentBinding"), id_map)
+            if block.get("interactionGroupId"):
+                block["interactionGroupId"] = f"{group_id}:{block['interactionGroupId']}"
             block["drawingId"] = group_id
             combined["blocks"].append(block)
         for point in copy.deepcopy(canvas.get("testPoints") or []):
@@ -330,6 +336,8 @@ def _combine_drawing_workspaces(drawing_results, report):
                 if point.get(field) in id_map:
                     point[field] = id_map[point[field]]
             point["sourceElementIds"] = [id_map.get(value, value) for value in point.get("sourceElementIds") or []]
+            if point.get("interactionGroupId"):
+                point["interactionGroupId"] = f"{group_id}:{point['interactionGroupId']}"
             point["drawingId"] = group_id
             combined["testPoints"].append(point)
 
