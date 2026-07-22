@@ -334,6 +334,7 @@ def _combine_drawing_workspaces(drawing_results, report):
             combined["testPoints"].append(point)
 
         drawing_name = str(item["dwg"].name or f"drawing-{index + 1}.dwg")
+        image_upload = item.get("image")
         combined["drawingGroups"].append({
             "id": group_id,
             "name": drawing_name,
@@ -341,7 +342,7 @@ def _combine_drawing_workspaces(drawing_results, report):
             "y": 0,
             "width": int(canvas.get("boardWidth") or 1600),
             "height": int(canvas.get("boardHeight") or 1280),
-            "imageName": str(item["image"].name or ""),
+            "imageName": str(image_upload.name or "") if image_upload else "",
         })
     combined["nextId"] = next_id
     workspace = copy.deepcopy(drawing_results[0]["result"]["workspace"])
@@ -361,53 +362,53 @@ class ImportExistingReportView(APIView):
         image_uploads = request.FILES.getlist("images") or [request.FILES.get("image") or request.FILES.get("preview")]
         dwg_uploads = [upload for upload in dwg_uploads if upload]
         image_uploads = [upload for upload in image_uploads if upload]
-        if len(dwg_uploads) != len(image_uploads):
-            return Response({"code": 400, "msg": "DWG 与校对图片数量必须一致，系统将按选择顺序配对"}, status=400)
-
         if not docx_upload or not str(docx_upload.name or "").lower().endswith(".docx"):
             return Response({"code": 400, "msg": "请上传已有报告 DOCX 文件"}, status=400)
         if not dwg_uploads or any(Path(str(upload.name or "")).suffix.lower() not in {".dwg", ".dxf"} for upload in dwg_uploads):
             return Response({"code": 400, "msg": "请上传对应的 DWG 或 DXF 文件"}, status=400)
-        if not image_uploads:
-            return Response({"code": 400, "msg": "请上传用于坐标校对的图片"}, status=400)
-
         try:
             report = parse_formatted_report.parse_formatted_report_docx(docx_upload.read())
             dwg_upload = dwg_uploads[0]
-            image_upload = image_uploads[0]
-            image_layout = _existing_report_image_layout(image_upload)
+            image_upload = image_uploads[0] if image_uploads else None
+            image_layout = _existing_report_image_layout(image_upload) if image_upload else None
             result = parse_dwg_workspace.parse_dwg_workspace(
                 dwg_upload.read(),
                 str(dwg_upload.name or "drawing.dwg"),
                 binding_data=report,
-                board_width=image_layout["width"],
-                board_height=image_layout["height"],
-                target_area=image_layout["targetArea"],
+                **({
+                    "board_width": image_layout["width"],
+                    "board_height": image_layout["height"],
+                    "target_area": image_layout["targetArea"],
+                } if image_layout else {}),
             )
             parse_dwg_workspace.finalize_existing_report_workspace(
                 result["workspace"],
-                image_data_url=image_layout["_dataUrl"],
-                image_filename=str(image_upload.name or "校对图片"),
+                image_data_url=image_layout["_dataUrl"] if image_layout else None,
+                image_filename=str(image_upload.name or "校对图片") if image_upload else "校对图片",
             )
             drawing_results = [{"dwg": dwg_upload, "image": image_upload, "result": result}]
-            image_layouts = [image_layout]
-            for extra_dwg, extra_image in zip(dwg_uploads[1:], image_uploads[1:]):
-                extra_layout = _existing_report_image_layout(extra_image)
+            image_layouts = [image_layout] if image_layout else []
+            for index, extra_dwg in enumerate(dwg_uploads[1:], start=1):
+                extra_image = image_uploads[index] if index < len(image_uploads) else None
+                extra_layout = _existing_report_image_layout(extra_image) if extra_image else None
                 extra_result = parse_dwg_workspace.parse_dwg_workspace(
                     extra_dwg.read(),
                     str(extra_dwg.name or "drawing.dwg"),
                     binding_data=report,
-                    board_width=extra_layout["width"],
-                    board_height=extra_layout["height"],
-                    target_area=extra_layout["targetArea"],
+                    **({
+                        "board_width": extra_layout["width"],
+                        "board_height": extra_layout["height"],
+                        "target_area": extra_layout["targetArea"],
+                    } if extra_layout else {}),
                 )
                 parse_dwg_workspace.finalize_existing_report_workspace(
                     extra_result["workspace"],
-                    image_data_url=extra_layout["_dataUrl"],
-                    image_filename=str(extra_image.name or "校对图片"),
+                    image_data_url=extra_layout["_dataUrl"] if extra_layout else None,
+                    image_filename=str(extra_image.name or "校对图片") if extra_image else "校对图片",
                 )
                 drawing_results.append({"dwg": extra_dwg, "image": extra_image, "result": extra_result})
-                image_layouts.append(extra_layout)
+                if extra_layout:
+                    image_layouts.append(extra_layout)
             workspace = _combine_drawing_workspaces(drawing_results, report)
             canvas = parse_dwg_workspace._active_canvas(workspace)
             result["stats"].update({
@@ -429,7 +430,7 @@ class ImportExistingReportView(APIView):
                         # "filename": saved["filename"],
                         "report": merged_report,
                         "workspace": workspace,
-                        "image": {key: value for key, value in image_layout.items() if not key.startswith("_")},
+                        "image": {key: value for key, value in image_layout.items() if not key.startswith("_")} if image_layout else {},
                         "images": [
                             {key: value for key, value in layout.items() if not key.startswith("_")}
                             for layout in image_layouts
@@ -453,4 +454,3 @@ class ImportExistingReportView(APIView):
         except Exception:
             logger.exception("导入已有报告失败")
             raise ReportDataError(detail="已有报告解析失败，请检查 DOCX、DWG 和校对图片")
-

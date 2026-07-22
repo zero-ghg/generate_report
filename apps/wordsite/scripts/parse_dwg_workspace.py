@@ -680,7 +680,9 @@ def _normalize_canvas(parsed, width, height, target_area=None):
         if path.get("hatchSpacing") is not None:
             path["hatchSpacing"] = max(float(path["hatchSpacing"]) * min(scale_x, scale_y), 3)
         if path.get("borderTileSize") is not None:
-            path["borderTileSize"] = max(float(path["borderTileSize"]) * min(scale_x, scale_y), 4)
+            # Preserve the CAD LP scale as a whole number.  A small LP size is
+            # valid and must not be lifted to the old four-unit minimum.
+            path["borderTileSize"] = round(float(path["borderTileSize"]) * min(scale_x, scale_y))
         if path.get("borderTileSpacing") is not None:
             path["borderTileSpacing"] = max(float(path["borderTileSpacing"]) * min(scale_x, scale_y), 8)
     _normalize_hatch_pattern_spacing(parsed["paths"])
