@@ -308,6 +308,78 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         self.assertIsNotNone(_match_marker_text("D30", {}, texts, []))
         self.assertIsNone(_match_marker_text("D31", {}, texts, []))
 
+    def test_matches_zero_padded_cad_grounding_markers_to_word_numbers(self):
+        texts = [
+            {
+                "id": 9,
+                "importedSourceHandles": ["GROUND-005"],
+                "text": "005",
+                "x": 110,
+                "y": 80,
+            },
+            {
+                "id": 10,
+                "importedSourceHandles": ["TRANSITION-D005"],
+                "text": "D005",
+                "x": 150,
+                "y": 80,
+            },
+        ]
+
+        grounding = _match_marker_text("5", {}, texts, [])
+        transition = _match_marker_text("D5", {}, texts, [])
+
+        self.assertEqual(grounding["sourceElementIds"], [9])
+        self.assertEqual(transition["sourceElementIds"], [10])
+
+    def test_prefers_location_code_over_matching_report_ordinal(self):
+        texts = [
+            {
+                "id": 11,
+                "importedSourceHandles": ["DL-005"],
+                "text": "005",
+                "x": 110,
+                "y": 80,
+            },
+            {
+                "id": 12,
+                "importedSourceHandles": ["DL-001"],
+                "text": "001",
+                "x": 150,
+                "y": 80,
+            },
+        ]
+
+        first = _match_marker_text("1", {"workLocation": "编号DL-005"}, texts, [])
+        fifth = _match_marker_text("5", {"workLocation": "编号DL-001"}, texts, [])
+
+        self.assertEqual(first["sourceElementIds"], [11])
+        self.assertEqual(fifth["sourceElementIds"], [12])
+
+    def test_keeps_zero_padded_location_codes_distinct_from_report_numbers(self):
+        texts = [
+            {
+                "id": 13,
+                "importedSourceHandles": ["DL-034"],
+                "text": "03\n4",
+                "x": 110,
+                "y": 80,
+            },
+            {
+                "id": 14,
+                "importedSourceHandles": ["REPORT-34"],
+                "text": "34",
+                "x": 150,
+                "y": 80,
+            },
+        ]
+
+        location_bound = _match_marker_text("37", {"workLocation": "编号DL-034"}, texts, [])
+        ordinal_bound = _match_marker_text("34", {"workLocation": "无编号"}, texts, [])
+
+        self.assertEqual(location_bound["sourceElementIds"], [13])
+        self.assertEqual(ordinal_bound["sourceElementIds"], [14])
+
     def test_imports_cad_range_as_one_visible_point_with_two_report_rows(self):
         document = ezdxf.new("R2018")
         document.modelspace().add_text("D55~D56", dxfattribs={"height": 2.5}).set_placement((20, 30))
@@ -380,6 +452,33 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         self.assertTrue(result[1]["reportOnly"])
         self.assertEqual(result[1]["reportMarker"], "D56")
         self.assertEqual(result[1]["visualTestPointId"], 10)
+
+    def test_keeps_consecutive_grounding_rows_as_independent_points(self):
+        points = [
+            {
+                "id": 20,
+                "label": "6",
+                "reportFields": {"equipmentName": "接地点"},
+                "reportType": "grounding",
+                "sourceElementIds": [1],
+                "x": 100,
+                "y": 80,
+            },
+            {
+                "id": 21,
+                "label": "7",
+                "reportFields": {"equipmentName": "接地点"},
+                "reportType": "grounding",
+                "sourceElementIds": [1],
+                "x": 120,
+                "y": 80,
+            },
+        ]
+
+        result = _collapse_paired_flange_test_points(points, [])
+
+        self.assertEqual([point["label"] for point in result], ["6", "7"])
+        self.assertFalse(any(point.get("reportOnly") for point in result))
 
     def test_removes_empty_frame_left_of_metal_roof_label(self):
         empty_frame = {

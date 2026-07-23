@@ -983,14 +983,34 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
                 })
                 continue
 
-            fields = _report_fields(row, report_type)
+            target_marker = str(target.get("markerLabel") or "").strip()
+            report_marker, report_row = _report_marker_for_display_label(
+                target_marker,
+                marker,
+                report_type,
+                report_tables,
+            )
+            fields = _report_fields(report_row or row, report_type)
             existing_binding = copy.deepcopy((existing or {}).get("binding"))
             target_binding = {
                 "id": target.get("id"),
                 "kind": target.get("kind") or "text",
             } if target.get("id") is not None else None
+            # Keep the label exactly as it appears on the CAD drawing for the
+            # canvas.  ``reportMarker`` is the Word-table row to update; these
+            # are deliberately separate because a drawing's ``006`` can be
+            # the physical DL-006 callout while its report row is point 4.
+            # A range label (D1-D3) is a shared CAD annotation, not the
+            # display label of each individual report row.  Keep individual
+            # row labels until the range-collapsing pass handles it.
+            display_marker = (
+                target_marker
+                if re.fullmatch(r"[A-Za-z]?\d+", target_marker)
+                else marker
+            )
             point = {
-                "label": marker,
+                "label": display_marker,
+                "reportMarker": report_marker,
                 "imported": True,
                 "side": (existing or {}).get("side") or target.get("side") or "right",
                 "sourceElementIds": target.get("sourceElementIds") or [],
@@ -1199,6 +1219,10 @@ def _collapse_paired_flange_test_points(test_points, paths):
             and first_match.group(1).upper() == second_match.group(1).upper()
             and int(second_match.group(2)) == int(first_match.group(2)) + 1
             and first.get("reportType") == second.get("reportType")
+            # Flange pairs belong to the transition-resistance table.  A
+            # grounding-resistance drawing can have nearby/same-source labels
+            # too; collapsing those hides real, independent test points.
+            and first.get("reportType") in {"transition", "equipotentialBonding"}
             and ("法兰" in equipment_text or bool(shared_source_ids))
             and math.hypot(
                 float(first.get("x") or 0) - float(second.get("x") or 0),
@@ -1465,8 +1489,34 @@ def _target_from_existing(existing, handle_targets):
 
 
 def _match_marker_text(marker, row, texts, paths):
+    # In many legacy drawings the visible callout is an equipment/location
+    # number (``005`` for ``编号DL-005``), not the ordinal used by the Word
+    # measurement table (for example test point ``1``).  Resolve that stable
+    # physical identifier first.  Falling back to the report ordinal is still
+    # needed for rows such as the photovoltaic and static-discharge points,
+    # whose CAD labels are the test-point number itself.
+    raw_location_markers, location_markers = _location_marker_candidates(row)
+    # Preserve the zero padding from ``DL-034`` for the first pass.  The same
+    # sheet can contain both ``034`` (a location code) and ``34`` (a report
+    # point number); canonical numeric comparison would otherwise make them
+    # indistinguishable and attach the location row to the wrong arrow.
+    location_candidates = [
+        text for text in texts
+        if _compact_marker_text(text.get("text")) in raw_location_markers
+    ]
+    if not location_candidates:
+        location_candidates = [
+            text for text in texts
+            if _normalize_marker(text.get("text")) in location_markers
+        ]
+    if location_candidates:
+        return _select_marker_target(location_candidates, row, paths, texts)
+
+    raw_marker = _compact_marker_text(marker)
     normalized = _normalize_marker(marker)
-    candidates = [text for text in texts if _normalize_marker(text.get("text")) == normalized]
+    candidates = [text for text in texts if _compact_marker_text(text.get("text")) == raw_marker]
+    if not candidates:
+        candidates = [text for text in texts if _normalize_marker(text.get("text")) == normalized]
     if not candidates:
         candidates = [
             text
@@ -1475,6 +1525,61 @@ def _match_marker_text(marker, row, texts, paths):
         ]
     if not candidates:
         return None
+    return _select_marker_target(candidates, row, paths, texts)
+
+
+def _location_marker_candidates(row):
+    """Return CAD label candidates encoded in a report's physical location.
+
+    The report uses values such as ``编号DL-005`` while the drawing commonly
+    renders only ``005``.  Both formats identify the same physical point.
+    Restrict extraction to an explicit ``编号`` or an alphabetic code to avoid
+    treating ordinary prose/numbers in the location column as point labels.
+    """
+    raw_candidates = set()
+    candidates = set()
+    if not isinstance(row, dict):
+        return raw_candidates, candidates
+    for key in ("workLocation", "installLocation", "referencePoint"):
+        value = re.sub(r"\s+", "", str(row.get(key) or "")).upper()
+        for match in re.finditer(r"(?:编号)?[A-Z]{1,8}[-_－—]?(\d{1,4})", value):
+            raw_candidates.add(match.group(1))
+            candidates.add(_normalize_marker(match.group(1)))
+        for match in re.finditer(r"编号(\d{1,4})", value):
+            raw_candidates.add(match.group(1))
+            candidates.add(_normalize_marker(match.group(1)))
+    return raw_candidates, candidates
+
+
+def _compact_marker_text(value):
+    """Remove display-only line breaks while retaining numeric padding."""
+    return re.sub(r"\s+", "", str(value or "")).upper()
+
+
+def _report_marker_for_display_label(display_marker, current_marker, report_type, report_tables):
+    """Bind a zero-padded CAD duplicate to its unpadded Word row when safe.
+
+    A sheet may contain both ``34`` and ``034`` as separate physical symbols.
+    When the Word row 34 has no physical location code, both symbols are
+    intentionally alternate CAD representations of that same report point.
+    Do not apply this to rows with a location code (for example ``006``),
+    because it identifies a different physical asset.
+    """
+    display = _compact_marker_text(display_marker)
+    compact_number = _normalize_marker(display)
+    if not re.fullmatch(r"0+\d+", display) or compact_number == _normalize_marker(current_marker):
+        return current_marker, None
+    for row in report_tables.get(report_type) or []:
+        if not isinstance(row, dict) or _normalize_marker(row.get("marker")) != compact_number:
+            continue
+        raw_locations, _ = _location_marker_candidates(row)
+        if not raw_locations:
+            return str(row.get("marker") or compact_number), row
+    return current_marker, None
+
+
+def _select_marker_target(candidates, row, paths, texts):
+    """Choose an unambiguous CAD label, using nearby report prose as a tie-breaker."""
     if len(candidates) == 1:
         return _marker_target_from_text(candidates[0], paths)
 
@@ -1550,7 +1655,9 @@ def _marker_target_from_text(text, paths):
             }))
 
     if not candidates:
-        return _item_target(text, "text")
+        target = _item_target(text, "text")
+        target["markerLabel"] = _compact_marker_text(text.get("text"))
+        return target
 
     _, _, _, marker, marker_box = min(candidates, key=lambda item: item[0])
     marker_parts = [marker]
@@ -1618,6 +1725,7 @@ def _marker_target_from_text(text, paths):
         + ([int(text.get("id"))] if text.get("id") is not None else [])
     ))
     return {
+        "markerLabel": _compact_marker_text(text.get("text")),
         "x": center_x,
         "y": center_y,
         "sourceElementIds": source_element_ids,
@@ -1794,8 +1902,20 @@ def _normalize_marker(value):
     ``1`` is a grounding-resistance point while ``D1`` is a transition-
     resistance point.  Treating both as ``1`` lets report-only transition rows
     overwrite visible grounding points from the CAD drawing.
+
+    CAD drawings commonly pad numeric callouts to a fixed width (``001``),
+    whereas the Word measurement table uses the same marker as ``1``.  The
+    padding is presentational rather than semantic, so remove it only from a
+    complete marker and retain its optional prefix (``D001`` remains ``D1``).
+    Do not touch compound labels such as ranges here: those are handled by
+    ``_marker_is_in_text_range``.
     """
-    return re.sub(r"\s+", "", str(value or "")).upper()
+    compact = _compact_marker_text(value)
+    match = re.fullmatch(r"([A-Z]?)(\d+)", compact)
+    if not match:
+        return compact
+    prefix, number = match.groups()
+    return f"{prefix}{int(number)}"
 
 
 def finalize_existing_report_workspace(workspace, image_data_url=None, image_filename="校对图片"):
