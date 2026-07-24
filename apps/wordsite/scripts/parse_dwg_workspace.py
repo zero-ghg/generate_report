@@ -493,6 +493,13 @@ class _DxfWorkspaceParser:
                         outlines = record_outlines(fallback_recorder.records)
                     finally:
                         modelspace.delete_entity(target)
+                if outlines and not _cad_glyph_outlines_complete(item, outlines):
+                    # Some SHX/CJK combinations are only partially supported
+                    # by ezdxf's recorder.  For example ``PLC柜`` may yield the
+                    # outline of the letter C alone.  Rendering that incomplete
+                    # geometry hides the remaining characters, so use the
+                    # browser text fallback for the complete semantic string.
+                    outlines = []
                 if outlines:
                     item["glyphPaths"] = outlines
                     item["glyphFillRule"] = "evenodd"
@@ -540,7 +547,16 @@ class _DxfWorkspaceParser:
                 item["fillColor"] = "#111111"
             else:
                 item["fillStyle"] = "hatch"
-                item["hatchAngle"] = float(getattr(entity.dxf, "pattern_angle", 45) or 45)
+                pattern_lines = getattr(getattr(entity, "pattern", None), "lines", None) or []
+                hatch_angles = []
+                for pattern_line in pattern_lines:
+                    angle = float(getattr(pattern_line, "angle", 0) or 0) % 180
+                    if not any(abs(angle - existing) < 0.01 for existing in hatch_angles):
+                        hatch_angles.append(angle)
+                if not hatch_angles:
+                    hatch_angles = [float(getattr(entity.dxf, "pattern_angle", 45) or 45) % 180]
+                item["hatchAngles"] = hatch_angles
+                item["hatchAngle"] = hatch_angles[0]
                 item["hatchSpacing"] = max(float(getattr(entity.dxf, "pattern_scale", 1) or 1) * 1.8, 0.5)
 
     def _parse_simple_geometry(self, entity, handle, layer):
@@ -603,6 +619,12 @@ def _browser_font_family(cad_font):
 def _wrapped_cad_text(item):
     """按 MTEXT 的排版宽度补充显式换行，避免长文字越过标题栏单元格。"""
     text = str(item.get("text") or "")
+    if "\n" not in text and re.fullmatch(r"(?:[A-Za-z]{1,8})?\d{1,4}", text.strip()):
+        # Short CAD identifiers such as SC1/SC2 and zero-padded test-point
+        # numbers such as 025 are single labels even when their MTEXT width is
+        # narrowly fitted around the glyphs.  Treating the width as a prose
+        # wrapping box incorrectly stacks the final digit.
+        return text
     box_width = float(item.get("cadBoxWidth") or 0)
     char_width = float(item.get("fontSize") or 0) * float(item.get("widthFactor") or 1)
     # Bold SimSun title-block values are laid out wider than their nominal
@@ -627,6 +649,21 @@ def _wrapped_cad_text(item):
             for index in range(0, len(paragraph), characters_per_line)
         )
     return "\n".join(lines)
+
+
+def _cad_glyph_outlines_complete(item, outlines):
+    """Reject recorder output that contains only a fragment of the text."""
+    points = [point for outline in outlines for point in outline]
+    if not points:
+        return False
+    outline_width = max(float(point["x"]) for point in points) - min(float(point["x"]) for point in points)
+    outline_height = max(float(point["y"]) for point in points) - min(float(point["y"]) for point in points)
+    text = str(item.get("text") or item.get("name") or "")
+    longest_line = max((len(line) for line in text.split("\n")), default=1)
+    font_size = max(float(item.get("fontSize") or 0), 0.01)
+    width_factor = max(abs(float(item.get("widthFactor") or 1)), 0.01)
+    nominal_width = longest_line * font_size * width_factor
+    return outline_width >= nominal_width * 0.4 and outline_height >= font_size * 0.25
 
 
 def _normalize_hatch_pattern_spacing(paths):
@@ -941,11 +978,15 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
     handle_targets = _handle_targets(parsed)
     text_candidates = parsed["texts"]
     existing_by_id = {str(point.get("id")): point for point in existing_points if point.get("id") is not None}
-    existing_by_label = {
-        str(point.get("label", "")).strip(): point
-        for point in existing_points
-        if str(point.get("label", "")).strip()
-    }
+    existing_by_label = {}
+    for point in existing_points:
+        # New workspaces display the Word table marker while retaining the
+        # original CAD marker separately.  Index every marker representation
+        # so re-importing a DWG preserves the user's adjusted position.
+        for key in ("label", "reportMarker", "sourceMarker"):
+            value = str(point.get(key) or "").strip()
+            if value:
+                existing_by_label.setdefault(value, point)
     test_points = []
     unmatched = []
     bound_rows = 0
@@ -960,13 +1001,30 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
                 # Keep the row in the report, but do not invent an unbound canvas point.
                 continue
             existing = existing_by_id.get(str(row.get("id"))) or existing_by_label.get(marker)
+            raw_locations = set()
+            if report_type == "grounding":
+                raw_locations, _ = _grounding_location_marker_candidates(row)
+            if report_type == "grounding" and existing is not None:
+                existing_source = _compact_marker_text(existing.get("sourceMarker"))
+                if raw_locations and existing_source not in raw_locations:
+                    # A workspace imported by an older matcher may have saved
+                    # row 8 at CAD 008 even though the row explicitly says
+                    # 编号010.  Preserve manual geometry only when its stored
+                    # physical source still agrees with the current report.
+                    existing = None
             # 前端工作区中的检测点通常已经人工校正过位置和方向。
             # 优先保留该坐标，避免再次解析 DWG 后因边界归一化产生偏移。
             target = _scaled_existing_point(existing, old_width, old_height, new_width, new_height)
             if target is None:
                 target = _target_from_existing(existing, handle_targets)
             if target is None and marker:
-                target = _match_marker_text(marker, row, text_candidates, parsed["paths"])
+                target = _match_marker_text(
+                    marker,
+                    row,
+                    text_candidates,
+                    parsed["paths"],
+                    report_type=report_type,
+                )
 
             row_id = _unique_row_id(row.get("id"), used_ids, next_id)
             if row_id >= next_id:
@@ -996,21 +1054,16 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
                 "id": target.get("id"),
                 "kind": target.get("kind") or "text",
             } if target.get("id") is not None else None
-            # Keep the label exactly as it appears on the CAD drawing for the
-            # canvas.  ``reportMarker`` is the Word-table row to update; these
-            # are deliberately separate because a drawing's ``006`` can be
-            # the physical DL-006 callout while its report row is point 4.
-            # A range label (D1-D3) is a shared CAD annotation, not the
-            # display label of each individual report row.  Keep individual
-            # row labels until the range-collapsing pass handles it.
-            display_marker = (
-                target_marker
-                if re.fullmatch(r"[A-Za-z]?\d+", target_marker)
-                else marker
-            )
+            # The Word table marker is the user-facing sequence number.  The
+            # CAD marker remains stable source metadata used only to find the
+            # physical symbol (for example table row ``1`` can match
+            # ``编号 DL-005`` / CAD label ``005``).  Keeping both prevents a
+            # later insertion/renumber from breaking the geometric binding.
+            display_marker = report_marker or marker
             point = {
                 "label": display_marker,
                 "reportMarker": report_marker,
+                "sourceMarker": target_marker or str((existing or {}).get("sourceMarker") or "").strip(),
                 "imported": True,
                 "side": (existing or {}).get("side") or target.get("side") or "right",
                 "sourceElementIds": target.get("sourceElementIds") or [],
@@ -1130,7 +1183,7 @@ def _collapse_declared_range_test_points(test_points, texts):
             continue
         members.sort(key=lambda point: marker_order[str(point.get("label") or "").strip()])
         primary = members[0]
-        primary_marker = str(primary.get("label") or "").strip()
+        primary_marker = str(primary.get("reportMarker") or primary.get("label") or "").strip()
         visible_point = {
             **primary,
             "label": _compact_range_label(range_markers),
@@ -1142,7 +1195,7 @@ def _collapse_declared_range_test_points(test_points, texts):
         result.append(visible_point)
         consumed_ids.add(primary.get("id"))
         for member in members[1:]:
-            marker = str(member.get("label") or "").strip()
+            marker = str(member.get("reportMarker") or member.get("label") or "").strip()
             result.append({
                 **member,
                 "label": marker,
@@ -1488,14 +1541,18 @@ def _target_from_existing(existing, handle_targets):
     return None
 
 
-def _match_marker_text(marker, row, texts, paths):
+def _match_marker_text(marker, row, texts, paths, report_type=None):
     # In many legacy drawings the visible callout is an equipment/location
     # number (``005`` for ``编号DL-005``), not the ordinal used by the Word
     # measurement table (for example test point ``1``).  Resolve that stable
     # physical identifier first.  Falling back to the report ordinal is still
     # needed for rows such as the photovoltaic and static-discharge points,
     # whose CAD labels are the test-point number itself.
-    raw_location_markers, location_markers = _location_marker_candidates(row)
+    raw_location_markers, location_markers = (
+        _grounding_location_marker_candidates(row)
+        if report_type == "grounding"
+        else (set(), set())
+    )
     # Preserve the zero padding from ``DL-034`` for the first pass.  The same
     # sheet can contain both ``034`` (a location code) and ``34`` (a report
     # point number); canonical numeric comparison would otherwise make them
@@ -1511,6 +1568,13 @@ def _match_marker_text(marker, row, texts, paths):
         ]
     if location_candidates:
         return _select_marker_target(location_candidates, row, paths, texts)
+    if raw_location_markers:
+        # An explicit physical code is authoritative.  If that code is absent
+        # from the drawing, binding the row to its report ordinal would attach
+        # it to an unrelated CAD point (for example report row 33 / 编号026
+        # incorrectly landing on CAD 033).  Leave it unmatched/report-only so
+        # the missing drawing point is visible to the user instead.
+        return None
 
     raw_marker = _compact_marker_text(marker)
     normalized = _normalize_marker(marker)
@@ -1528,13 +1592,15 @@ def _match_marker_text(marker, row, texts, paths):
     return _select_marker_target(candidates, row, paths, texts)
 
 
-def _location_marker_candidates(row):
-    """Return CAD label candidates encoded in a report's physical location.
+def _grounding_location_marker_candidates(row):
+    """Return explicit physical codes encoded in a grounding report location.
 
-    The report uses values such as ``编号DL-005`` while the drawing commonly
-    renders only ``005``.  Both formats identify the same physical point.
-    Restrict extraction to an explicit ``编号`` or an alphabetic code to avoid
-    treating ordinary prose/numbers in the location column as point labels.
+    Reports use both ``编号DL-005`` and ``编号005`` while the drawing commonly
+    renders only ``005``.  All three formats identify the same physical point.
+    A number is accepted only when it immediately follows the explicit
+    ``编号`` prefix (with an optional ``DL`` segment), so equipment identifiers
+    such as BV102, PIT101, SDV101 and CT-101 remain descriptive names rather
+    than drawing-point identifiers.
     """
     raw_candidates = set()
     candidates = set()
@@ -1542,12 +1608,10 @@ def _location_marker_candidates(row):
         return raw_candidates, candidates
     for key in ("workLocation", "installLocation", "referencePoint"):
         value = re.sub(r"\s+", "", str(row.get(key) or "")).upper()
-        for match in re.finditer(r"(?:编号)?[A-Z]{1,8}[-_－—]?(\d{1,4})", value):
-            raw_candidates.add(match.group(1))
-            candidates.add(_normalize_marker(match.group(1)))
-        for match in re.finditer(r"编号(\d{1,4})", value):
-            raw_candidates.add(match.group(1))
-            candidates.add(_normalize_marker(match.group(1)))
+        for match in re.finditer(r"编号(?:DL[-_－—]?)?(\d{1,4})(?!\d)", value):
+            physical_marker = match.group(1)
+            raw_candidates.add(physical_marker)
+            candidates.add(_normalize_marker(physical_marker))
     return raw_candidates, candidates
 
 
@@ -1569,10 +1633,29 @@ def _report_marker_for_display_label(display_marker, current_marker, report_type
     compact_number = _normalize_marker(display)
     if not re.fullmatch(r"0+\d+", display) or compact_number == _normalize_marker(current_marker):
         return current_marker, None
+    if report_type == "grounding":
+        current_row = next(
+            (
+                row
+                for row in report_tables.get(report_type) or []
+                if isinstance(row, dict)
+                and _normalize_marker(row.get("marker")) == _normalize_marker(current_marker)
+            ),
+            None,
+        )
+        current_location_markers, _ = _grounding_location_marker_candidates(current_row)
+        if display in current_location_markers:
+            # ``034`` is the physical DL-034 code of the current row.  Do not
+            # reinterpret it as the ordinal report row 34.
+            return current_marker, None
     for row in report_tables.get(report_type) or []:
         if not isinstance(row, dict) or _normalize_marker(row.get("marker")) != compact_number:
             continue
-        raw_locations, _ = _location_marker_candidates(row)
+        raw_locations, _ = (
+            _grounding_location_marker_candidates(row)
+            if report_type == "grounding"
+            else (set(), set())
+        )
         if not raw_locations:
             return str(row.get("marker") or compact_number), row
     return current_marker, None
@@ -1945,6 +2028,22 @@ def finalize_existing_report_workspace(workspace, image_data_url=None, image_fil
                 item["testPointSource"] = True
     for point in test_points:
         point["cadSourceVisible"] = bool(point.get("interactionGroupId"))
+        source_marker = _compact_marker_text(point.get("sourceMarker"))
+        display_marker = _compact_marker_text(point.get("label"))
+        if not source_marker or source_marker == display_marker:
+            continue
+        source_ids = {
+            int(item_id)
+            for item_id in point.get("sourceElementIds") or []
+            if str(item_id).strip().isdigit()
+        }
+        # Retain the original CAD arrow/geometry but hide only its old number.
+        # The semantic test-point overlay now renders the Word table marker.
+        for text in texts:
+            if int(text.get("id") or 0) not in source_ids:
+                continue
+            if _compact_marker_text(text.get("text")) == source_marker:
+                text["hidden"] = True
     width = float(canvas.get("boardWidth") or 1600)
     height = float(canvas.get("boardHeight") or 1280)
     paths = [path for path in paths if not _is_orphan_legend_swatch(path, width, height)]
@@ -1960,6 +2059,8 @@ def finalize_existing_report_workspace(workspace, image_data_url=None, image_fil
     paths = _remove_title_block_fill_artifacts(paths, chrome_regions["titleBlock"])
     _normalize_north_labels(texts, width, height)
     _fit_cad_text_to_enclosing_boxes(texts, paths)
+    _separate_connector_identifier_labels(texts, paths)
+    _anchor_room_labels_to_enclosing_boxes(texts, paths)
     readonly_regions = {
         "legend": chrome_regions["legend"],
         "titleBlock": chrome_regions["titleBlock"],
@@ -2130,9 +2231,11 @@ def _is_orphan_legend_swatch(path, width, height):
     box = _path_box(path)
     center_x = box["x"] + box["width"] / 2
     center_y = box["y"] + box["height"] / 2
+    pattern_name = str(path.get("patternName") or "").upper()
     return (
-        width * 0.78 <= center_x <= width * 0.87
-        and height * 0.72 <= center_y <= height * 0.82
+        pattern_name == "DASH"
+        and width * 0.70 <= center_x <= width * 0.90
+        and height * 0.68 <= center_y <= height * 0.86
         and width * 0.02 <= box["width"] <= width * 0.08
         and box["height"] <= height * 0.015
     )
@@ -2297,6 +2400,10 @@ def _remove_metal_roof_legend_empty_frame(paths, texts, region):
         candidates = []
         for path in paths:
             if not path.get("closed") or not _box_center_in_region(_path_box(path), region):
+                continue
+            # Keep the real filled symbol. Some CAD files add a coincident
+            # unfilled outline around it; only that empty outline is redundant.
+            if path.get("hatch") or path.get("fillStyle") in {"hatch", "solid"}:
                 continue
             box = _path_box(path)
             gap = label_box["x"] - (box["x"] + box["width"])
@@ -2592,6 +2699,91 @@ def _fit_cad_text_to_enclosing_boxes(texts, paths):
         item["fontSize"] = max(float(item.get("fontSize") or 0) * scale, 4)
         item["width"] = fitted_width
         item["height"] = fitted_height
+
+
+def _separate_connector_identifier_labels(texts, paths):
+    """Keep SC1/SC2 connector names above, rather than inside, their boxes."""
+    rectangles = [
+        _path_box(path)
+        for path in paths
+        if path.get("closed")
+        and 8 <= _path_box(path)["width"] <= 80
+        and 6 <= _path_box(path)["height"] <= 45
+    ]
+    for item in texts:
+        value = re.sub(r"\s+", "", str(item.get("text") or item.get("name") or "")).upper()
+        if not re.fullmatch(r"SC\d{1,3}", value):
+            continue
+        text_box = _item_box(item)
+        text_center_x = text_box["x"] + text_box["width"] / 2
+        candidates = [
+            box for box in rectangles
+            if box["x"] - 2 <= text_center_x <= box["x"] + box["width"] + 2
+            and text_box["y"] < box["y"] + box["height"] / 2
+            and text_box["y"] + text_box["height"] >= box["y"] - 3
+            and box["y"] - (text_box["y"] + text_box["height"]) <= text_box["height"]
+        ]
+        if not candidates:
+            continue
+        target = min(candidates, key=lambda box: (box["y"] - text_box["y"], box["width"] * box["height"]))
+        gap = max(2.5, float(item.get("fontSize") or 0) * 0.18)
+        target_box_y = target["y"] - text_box["height"] - gap
+        item["y"] = float(item.get("y") or 0) + target_box_y - text_box["y"]
+
+
+def _anchor_room_labels_to_enclosing_boxes(texts, paths):
+    """Place room captions consistently at the lower-left inside their room."""
+    room_labels = {"配电室"}
+    closed_boxes = [_path_box(path) for path in paths if path.get("closed")]
+
+    def contains(outer, inner, tolerance=1):
+        return (
+            outer["x"] - tolerance <= inner["x"]
+            and outer["y"] - tolerance <= inner["y"]
+            and outer["x"] + outer["width"] + tolerance >= inner["x"] + inner["width"]
+            and outer["y"] + outer["height"] + tolerance >= inner["y"] + inner["height"]
+        )
+
+    # A room frame is structural: it contains several independent equipment
+    # boxes.  Absolute width/height thresholds are unsafe because importing a
+    # calibrated preview can scale an ordinary cabinet above those thresholds.
+    room_frames = []
+    for outer in closed_boxes:
+        outer_area = outer["width"] * outer["height"]
+        if outer_area <= 0:
+            continue
+        nested_equipment = [
+            inner for inner in closed_boxes
+            if inner is not outer
+            and inner["width"] < outer["width"] * 0.8
+            and inner["height"] < outer["height"] * 0.8
+            and inner["width"] * inner["height"] < outer_area * 0.45
+            and contains(outer, inner)
+        ]
+        if len(nested_equipment) >= 3:
+            room_frames.append(outer)
+
+    for item in texts:
+        value = re.sub(r"\s+", "", str(item.get("text") or item.get("name") or ""))
+        if value not in room_labels:
+            continue
+        text_box = _item_box(item)
+        center_x = text_box["x"] + text_box["width"] / 2
+        center_y = text_box["y"] + text_box["height"] / 2
+        candidates = [
+            box for box in room_frames
+            if box["x"] <= center_x <= box["x"] + box["width"]
+            and box["y"] <= center_y <= box["y"] + box["height"]
+        ]
+        if not candidates:
+            continue
+        target = min(candidates, key=lambda box: box["width"] * box["height"])
+        horizontal_gap = max(3, target["width"] * 0.02)
+        vertical_gap = max(4, target["height"] * 0.03)
+        target_box_x = target["x"] + horizontal_gap
+        target_box_y = target["y"] + target["height"] - text_box["height"] - vertical_gap
+        item["x"] = float(item.get("x") or 0) + target_box_x - text_box["x"]
+        item["y"] = float(item.get("y") or 0) + target_box_y - text_box["y"]
 
 
 def _assign_legend_icon_groups(paths, texts, region):

@@ -14,15 +14,21 @@ from apps.wordsite.scripts.generate_formatted_report import (
 from apps.wordsite.scripts.parse_formatted_report import parse_summary_table, parse_transition_row
 from apps.wordsite.scripts.parse_dwg_workspace import (
     _assign_interaction_groups,
+    _cad_glyph_outlines_complete,
     _collapse_paired_flange_test_points,
     _fit_cad_text_to_enclosing_boxes,
+    _is_orphan_legend_swatch,
     _match_marker_text,
     _marker_text_visual_box,
     _merge_legend_hatch_parts,
     _report_fields,
     _remove_metal_roof_legend_empty_frame,
     _remove_redundant_large_hatch_outlines,
+    _report_marker_for_display_label,
+    _anchor_room_labels_to_enclosing_boxes,
+    _separate_connector_identifier_labels,
     _separate_overlapping_marker_label,
+    _wrapped_cad_text,
     finalize_existing_report_workspace,
     parse_dwg_workspace,
 )
@@ -30,6 +36,105 @@ from apps.wordsite.scripts.parse_dwg_workspace import (
 
 # DWG/DXF 工作区解析测试：验证图纸文字与检测表记录共享 id，并保留未匹配记录。
 class DwgWorkspaceParserTests(SimpleTestCase):
+    def test_moves_sc_connector_identifier_above_its_box(self):
+        texts = [{
+            "fontSize": 10,
+            "height": 12,
+            "text": "SC1",
+            "width": 20,
+            "x": 110,
+            "y": 90,
+        }]
+        paths = [{
+            "closed": True,
+            "points": [
+                {"x": 105, "y": 100},
+                {"x": 135, "y": 100},
+                {"x": 135, "y": 116},
+                {"x": 105, "y": 116},
+            ],
+        }]
+
+        _separate_connector_identifier_labels(texts, paths)
+
+        self.assertLessEqual(texts[0]["y"] + texts[0]["height"], 97.5)
+
+    def test_anchors_distribution_room_label_inside_lower_left_corner(self):
+        texts = [{
+            "fontSize": 14,
+            "height": 18,
+            "text": "配电室",
+            "width": 56,
+            "x": 180,
+            "y": 180,
+        }]
+        def rectangle(left, top, right, bottom):
+            return {
+                "closed": True,
+                "points": [
+                    {"x": left, "y": top},
+                    {"x": right, "y": top},
+                    {"x": right, "y": bottom},
+                    {"x": left, "y": bottom},
+                ],
+            }
+
+        paths = [
+            rectangle(100, 100, 300, 300),  # room frame
+            rectangle(170, 170, 250, 210),  # misleading nearby equipment box
+            rectangle(170, 115, 250, 145),
+            rectangle(170, 220, 250, 250),
+        ]
+
+        _anchor_room_labels_to_enclosing_boxes(texts, paths)
+
+        self.assertAlmostEqual(texts[0]["x"], 104)
+        self.assertAlmostEqual(texts[0]["y"], 276)
+
+    def test_keeps_short_cad_identifiers_on_one_line(self):
+        item = {
+            "cadBoxWidth": 5.5,
+            "fontSize": 4,
+            "fontWeight": 400,
+            "text": "SC1",
+            "widthFactor": 0.8,
+        }
+
+        self.assertEqual(_wrapped_cad_text(item), "SC1")
+
+    def test_keeps_zero_padded_numeric_marker_on_one_line(self):
+        item = {
+            "cadBoxWidth": 5.5,
+            "fontSize": 4,
+            "fontWeight": 400,
+            "text": "025",
+            "widthFactor": 0.8,
+        }
+
+        self.assertEqual(_wrapped_cad_text(item), "025")
+
+    def test_rejects_partial_cad_glyph_outlines(self):
+        item = {
+            "fontSize": 5.2,
+            "text": "PLC柜",
+            "widthFactor": 0.8,
+        }
+        only_letter_c = [[
+            {"x": 0, "y": 0},
+            {"x": 3.2, "y": 0},
+            {"x": 3.2, "y": 5},
+            {"x": 0, "y": 5},
+        ]]
+        complete_label = [[
+            {"x": 0, "y": 0},
+            {"x": 15, "y": 0},
+            {"x": 15, "y": 5},
+            {"x": 0, "y": 5},
+        ]]
+
+        self.assertFalse(_cad_glyph_outlines_complete(item, only_letter_c))
+        self.assertTrue(_cad_glyph_outlines_complete(item, complete_label))
+
     def test_pads_measurement_rows_to_full_page_capacity(self):
         document = Document()
         table = document.add_table(rows=34, cols=8)
@@ -350,11 +455,169 @@ class DwgWorkspaceParserTests(SimpleTestCase):
             },
         ]
 
-        first = _match_marker_text("1", {"workLocation": "编号DL-005"}, texts, [])
-        fifth = _match_marker_text("5", {"workLocation": "编号DL-001"}, texts, [])
+        first = _match_marker_text(
+            "1",
+            {"workLocation": "编号DL-005"},
+            texts,
+            [],
+            report_type="grounding",
+        )
+        fifth = _match_marker_text(
+            "5",
+            {"workLocation": "编号DL-001"},
+            texts,
+            [],
+            report_type="grounding",
+        )
 
         self.assertEqual(first["sourceElementIds"], [11])
         self.assertEqual(fifth["sourceElementIds"], [12])
+
+    def test_prefers_plain_numbered_location_over_report_ordinal(self):
+        texts = [
+            {
+                "id": 101,
+                "importedSourceHandles": ["CAD-008"],
+                "text": "008",
+                "x": 110,
+                "y": 80,
+            },
+            {
+                "id": 102,
+                "importedSourceHandles": ["CAD-010"],
+                "text": "010",
+                "x": 150,
+                "y": 80,
+            },
+        ]
+
+        target = _match_marker_text(
+            "8",
+            {"workLocation": "编号010，动力接线箱"},
+            texts,
+            [],
+            report_type="grounding",
+        )
+
+        self.assertEqual(target["sourceElementIds"], [102])
+
+    def test_plain_numbered_locations_keep_zero_padding_and_map_independently(self):
+        texts = [
+            {
+                "id": 201,
+                "importedSourceHandles": ["CAD-008"],
+                "text": "008",
+                "x": 110,
+                "y": 80,
+            },
+            {
+                "id": 202,
+                "importedSourceHandles": ["CAD-010"],
+                "text": "010",
+                "x": 150,
+                "y": 80,
+            },
+            {
+                "id": 203,
+                "importedSourceHandles": ["CAD-012"],
+                "text": "012",
+                "x": 190,
+                "y": 80,
+            },
+        ]
+
+        cases = [
+            ("7", "编号008，机柜间", 201),
+            ("8", "编号010，动力接线箱", 202),
+            ("13", "编号012，太阳能光伏板支架", 203),
+        ]
+        for report_marker, work_location, expected_id in cases:
+            with self.subTest(report_marker=report_marker):
+                target = _match_marker_text(
+                    report_marker,
+                    {"workLocation": work_location},
+                    texts,
+                    [],
+                    report_type="grounding",
+                )
+                self.assertEqual(target["sourceElementIds"], [expected_id])
+
+    def test_does_not_fall_back_to_report_ordinal_when_explicit_code_is_missing(self):
+        texts = [
+            {
+                "id": 301,
+                "importedSourceHandles": ["CAD-033"],
+                "text": "033",
+                "x": 110,
+                "y": 80,
+            },
+        ]
+
+        target = _match_marker_text(
+            "33",
+            {"workLocation": "编号026，缺少的图纸测试点"},
+            texts,
+            [],
+            report_type="grounding",
+        )
+
+        self.assertIsNone(target)
+
+    def test_location_code_matching_is_limited_to_grounding_rows(self):
+        texts = [
+            {
+                "id": 15,
+                "importedSourceHandles": ["DL-005"],
+                "text": "005",
+                "x": 110,
+                "y": 80,
+            },
+            {
+                "id": 16,
+                "importedSourceHandles": ["TRANSITION-D1"],
+                "text": "D1",
+                "x": 150,
+                "y": 80,
+            },
+        ]
+
+        transition = _match_marker_text(
+            "D1",
+            {"workLocation": "编号DL-005"},
+            texts,
+            [],
+            report_type="transition",
+        )
+
+        self.assertEqual(transition["sourceElementIds"], [16])
+
+    def test_does_not_treat_equipment_model_as_grounding_location_code(self):
+        texts = [
+            {
+                "id": 17,
+                "importedSourceHandles": ["EQUIPMENT-BV102"],
+                "text": "102",
+                "x": 110,
+                "y": 80,
+            },
+            {
+                "id": 18,
+                "importedSourceHandles": ["REPORT-16"],
+                "text": "16",
+                "x": 150,
+                "y": 80,
+            },
+        ]
+
+        target = _match_marker_text(
+            "16",
+            {"workLocation": "无编号，BV102接地点"},
+            texts,
+            [],
+            report_type="grounding",
+        )
+
+        self.assertEqual(target["sourceElementIds"], [18])
 
     def test_keeps_zero_padded_location_codes_distinct_from_report_numbers(self):
         texts = [
@@ -374,11 +637,70 @@ class DwgWorkspaceParserTests(SimpleTestCase):
             },
         ]
 
-        location_bound = _match_marker_text("37", {"workLocation": "编号DL-034"}, texts, [])
-        ordinal_bound = _match_marker_text("34", {"workLocation": "无编号"}, texts, [])
+        location_bound = _match_marker_text(
+            "37",
+            {"workLocation": "编号DL-034"},
+            texts,
+            [],
+            report_type="grounding",
+        )
+        ordinal_bound = _match_marker_text(
+            "34",
+            {"workLocation": "无编号"},
+            texts,
+            [],
+            report_type="grounding",
+        )
 
         self.assertEqual(location_bound["sourceElementIds"], [13])
         self.assertEqual(ordinal_bound["sourceElementIds"], [14])
+
+    def test_dl_034_keeps_its_current_report_row_instead_of_row_34(self):
+        report_tables = {
+            "grounding": [
+                {"marker": "34", "workLocation": "无编号，放空区静电泄放装置接地点"},
+                {"marker": "37", "workLocation": "编号DL-034，新建监控摄像头接地点"},
+            ],
+        }
+
+        marker, replacement = _report_marker_for_display_label(
+            "034",
+            "37",
+            "grounding",
+            report_tables,
+        )
+
+        self.assertEqual(marker, "37")
+        self.assertIsNone(replacement)
+
+    def test_displays_word_marker_and_retains_cad_location_marker_as_source(self):
+        document = ezdxf.new("R2018")
+        document.modelspace().add_text("005", dxfattribs={"height": 2.5}).set_placement((20, 30))
+        stream = StringIO()
+        document.write(stream)
+        binding_data = {
+            "reportTables": {
+                "grounding": [{
+                    "marker": "1",
+                    "workLocation": "编号DL-005",
+                    "equipmentName": "围墙接地点",
+                }],
+            },
+        }
+
+        result = parse_dwg_workspace(stream.getvalue().encode("utf-8"), "sample.dxf", binding_data)
+        canvas = result["workspace"]["tabData"]["1"]
+        point = canvas["testPoints"][0]
+
+        self.assertEqual(point["label"], "1")
+        self.assertEqual(point["reportMarker"], "1")
+        self.assertEqual(point["sourceMarker"], "005")
+        self.assertEqual(point["reportFields"]["workLocation"], "编号DL-005")
+        self.assertEqual(point["reportFields"]["equipmentName"], "围墙接地点")
+
+        finalize_existing_report_workspace(result["workspace"])
+        source_label = next(text for text in canvas["texts"] if text.get("text") == "005")
+        self.assertTrue(source_label["hidden"])
 
     def test_imports_cad_range_as_one_visible_point_with_two_report_rows(self):
         document = ezdxf.new("R2018")
@@ -506,8 +828,8 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         }
         texts = [{
             "height": 32,
-            "name": "金属屋面",
-            "text": "金属屋面",
+            "name": "\u91d1\u5c5e\u5c4b\u9762",
+            "text": "\u91d1\u5c5e\u5c4b\u9762",
             "width": 120,
             "x": 220,
             "y": 106,
@@ -520,6 +842,59 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         )
 
         self.assertEqual([path["id"] for path in result], [2])
+
+    def test_keeps_metal_roof_hatch_and_removes_coincident_empty_outline(self):
+        actual_hatch = {
+            "closed": True,
+            "fillStyle": "hatch",
+            "hatch": True,
+            "id": 1,
+            "name": "HATCH",
+            "points": [
+                {"x": 100, "y": 100},
+                {"x": 170, "y": 100},
+                {"x": 170, "y": 130},
+                {"x": 100, "y": 130},
+            ],
+        }
+        empty_outline = {
+            "closed": True,
+            "id": 2,
+            "name": "LWPOLYLINE",
+            "points": actual_hatch["points"],
+        }
+        texts = [{
+            "height": 24,
+            "name": "\u91d1\u5c5e\u5c4b\u9762",
+            "text": "\u91d1\u5c5e\u5c4b\u9762",
+            "width": 90,
+            "x": 180,
+            "y": 103,
+        }]
+
+        result = _remove_metal_roof_legend_empty_frame(
+            [actual_hatch, empty_outline],
+            texts,
+            {"x": 80, "y": 80, "width": 240, "height": 100},
+        )
+
+        self.assertEqual([path["id"] for path in result], [1])
+
+    def test_removes_dash_title_swatch_after_default_dwg_normalization(self):
+        swatch = {
+            "closed": True,
+            "id": 1,
+            "name": "HATCH",
+            "patternName": "DASH",
+            "points": [
+                {"x": 1213.25, "y": 920.27},
+                {"x": 1271.01, "y": 920.27},
+                {"x": 1271.01, "y": 924.24},
+                {"x": 1213.25, "y": 924.24},
+            ],
+        }
+
+        self.assertTrue(_is_orphan_legend_swatch(swatch, 1600, 1280))
 
     def test_removes_upper_stacked_legend_hatch_frame(self):
         upper = {
@@ -871,6 +1246,51 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         self.assertEqual(point["size"], 0.45)
         self.assertEqual(point["binding"], {"id": 9, "kind": "path"})
 
+    def test_reimport_replaces_stale_ordinal_binding_with_explicit_physical_code(self):
+        document = ezdxf.new("R2018")
+        modelspace = document.modelspace()
+        modelspace.add_text("008", dxfattribs={"height": 2.5}).set_placement((20, 30))
+        modelspace.add_text("010", dxfattribs={"height": 2.5}).set_placement((80, 30))
+        stream = StringIO()
+        document.write(stream)
+        binding_data = {
+            "boardWidth": 800,
+            "boardHeight": 640,
+            "testPoints": [
+                {
+                    "id": 50,
+                    "label": "8",
+                    "reportMarker": "8",
+                    "sourceMarker": "008",
+                    "x": 200,
+                    "y": 320,
+                    "side": "left",
+                },
+            ],
+            "reportTables": {
+                "grounding": [
+                    {
+                        "id": 50,
+                        "marker": "8",
+                        "workLocation": "编号010，动力接线箱",
+                    },
+                ],
+            },
+        }
+
+        result = parse_dwg_workspace(
+            stream.getvalue().encode("utf-8"),
+            "sample.dxf",
+            binding_data,
+            board_width=1600,
+            board_height=1280,
+        )
+        point = result["workspace"]["tabData"]["1"]["testPoints"][0]
+
+        self.assertEqual(point["reportMarker"], "8")
+        self.assertEqual(point["sourceMarker"], "010")
+        self.assertNotEqual((point["x"], point["y"]), (400, 640))
+
     def test_preserves_cad_fill_and_text_render_metadata(self):
         document = ezdxf.new("R2018")
         modelspace = document.modelspace()
@@ -928,6 +1348,7 @@ class DwgWorkspaceParserTests(SimpleTestCase):
 
         self.assertEqual(patterned["fillStyle"], "hatch")
         self.assertEqual(patterned["hatchAngle"], 45.0)
+        self.assertEqual(patterned["hatchAngles"], [45.0])
         self.assertGreaterEqual(patterned["hatchSpacing"], 3)
         self.assertEqual(marker["fillStyle"], "solid")
         self.assertEqual(marker["fillColor"], "#111111")
