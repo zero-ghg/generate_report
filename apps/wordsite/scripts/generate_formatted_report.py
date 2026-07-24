@@ -2089,6 +2089,13 @@ def render_legend_images(legend):
 
 def legend_image_sources(legend):
     sources = []
+    preview_images = legend.get("previewImages")
+    if isinstance(preview_images, list):
+        # These are raster snapshots made by the frontend preview renderer.
+        # They take priority over backend reconstruction of the drawing.
+        sources.extend(source for source in preview_images if isinstance(source, str) and source.strip())
+    if sources:
+        return sources
     for key in (
         "image",
         "imageData",
@@ -2143,6 +2150,38 @@ def extract_legend_canvases(legend):
     workspace = normalize_legend_workspace(legend)
     if not workspace:
         return []
+
+    # A multi-DWG/child-board workspace keeps every sheet in one canvas while
+    # tagging its elements with ``drawingId``.  Export each sheet separately;
+    # treating the combined canvas as one page previously rendered only the
+    # first visible drawing in the final Word chapter.
+    drawing_groups = workspace.get("drawingGroups")
+    if isinstance(drawing_groups, list) and drawing_groups:
+        canvases = []
+        for drawing in drawing_groups:
+            if not isinstance(drawing, dict) or not drawing.get("id"):
+                continue
+            drawing_id = drawing.get("id")
+            canvas = {
+                **workspace,
+                "boardHeight": drawing.get("height") or workspace.get("boardHeight"),
+                "boardWidth": drawing.get("width") or workspace.get("boardWidth"),
+                "drawingGroups": [],
+                "drawingName": drawing.get("name") or "",
+            }
+            for key in ("paths", "blocks", "texts", "testPoints"):
+                canvas[key] = [
+                    item for item in workspace.get(key) or []
+                    if isinstance(item, dict) and item.get("drawingId") == drawing_id
+                ]
+            # Imported multi-DWG sheets are already represented by their
+            # parsed elements. A single shared image would otherwise be
+            # repeated behind every exported child board.
+            canvas["importedBoard"] = None
+            if has_canvas_content(canvas):
+                canvases.append(canvas)
+        if canvases:
+            return canvases
 
     if workspace.get("boardWidth") and workspace.get("boardHeight"):
         return [workspace]
@@ -2449,7 +2488,37 @@ def add_legend_image(document, image):
 
 def rotate_legend_image_for_page(image):
     if image.get("format") == "svg":
-        return image
+        # macOS exports commonly fall back to embedded SVG (the headless SVG →
+        # PNG renderer is unavailable there). Rotate that SVG directly instead
+        # of silently leaving it horizontal.
+        source = image["stream"]
+        source.seek(0)
+        try:
+            svg_text = source.read().decode("utf-8")
+        except UnicodeDecodeError:
+            source.seek(0)
+            return image
+        width = float(image.get("width") or 900)
+        height = float(image.get("height") or 600)
+        svg_match = re.match(r"\s*(<svg\b[^>]*>)(.*)(</svg>)\s*$", svg_text, flags=re.DOTALL | re.IGNORECASE)
+        if not svg_match:
+            return image
+        opening_tag, content, closing_tag = svg_match.groups()
+        opening_tag = re.sub(r'\s(?:width|height|viewBox)=(?:"[^"]*"|\'[^\']*\')', '', opening_tag, flags=re.IGNORECASE)
+        rotated_svg = (
+            f'{opening_tag[:-1]} width="{height:g}" height="{width:g}" '
+            f'viewBox="0 0 {height:g} {width:g}">'
+            # In SVG's downward-positive y-axis, -90° is visually
+            # counter-clockwise. Translate by the original width afterwards.
+            f'<g transform="translate(0 {width:g}) rotate(-90)">{content}</g>{closing_tag}'
+        )
+        return {
+            **image,
+            "stream": BytesIO(rotated_svg.encode("utf-8")),
+            "width": height,
+            "height": width,
+        }
+
     try:
         from PIL import Image
     except ImportError:

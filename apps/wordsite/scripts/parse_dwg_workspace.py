@@ -557,7 +557,13 @@ class _DxfWorkspaceParser:
                     hatch_angles = [float(getattr(entity.dxf, "pattern_angle", 45) or 45) % 180]
                 item["hatchAngles"] = hatch_angles
                 item["hatchAngle"] = hatch_angles[0]
-                item["hatchSpacing"] = max(float(getattr(entity.dxf, "pattern_scale", 1) or 1) * 1.8, 0.5)
+                # ``pattern_scale`` is the CAD author's intended visual scale.
+                # The browser hatch renderer draws one full line for each unit of
+                # this value (rather than the short dash segments in a DXF
+                # pattern), so a little extra breathing room is needed to make
+                # a large ANSI hatch look like the source drawing instead of a
+                # dark, over-dense screen fill.
+                item["hatchSpacing"] = max(float(getattr(entity.dxf, "pattern_scale", 1) or 1) * 3.0, 0.5)
 
     def _parse_simple_geometry(self, entity, handle, layer):
         entity_type = entity.dxftype()
@@ -667,7 +673,7 @@ def _cad_glyph_outlines_complete(item, outlines):
 
 
 def _normalize_hatch_pattern_spacing(paths):
-    """Keep CAD hatch patterns dense enough to remain visible after scaling."""
+    """Scale CAD hatch spacing to the visible area without over-densifying it."""
     for path in paths:
         if str(path.get("fillStyle") or "").lower() != "hatch":
             continue
@@ -679,9 +685,14 @@ def _normalize_hatch_pattern_spacing(paths):
         short_side = min(max(xs) - min(xs), max(ys) - min(ys))
         if short_side <= 0:
             continue
-        visual_cap = max(3.0, min(24.0, short_side / 8.0))
-        current = float(path.get("hatchSpacing") or visual_cap)
-        path["hatchSpacing"] = min(current, visual_cap)
+        # The old fixed 24px ceiling made a large ANSI hatch unnaturally dense.
+        # A proportionate ceiling retains the DWG pattern's scale relationship
+        # while preventing very large source-unit scales from becoming blank
+        # regions after the drawing is fitted to the board.
+        visual_floor = max(3.0, min(12.0, short_side / 16.0))
+        visual_ceiling = max(12.0, min(48.0, short_side / 18.0))
+        current = float(path.get("hatchSpacing") or visual_floor)
+        path["hatchSpacing"] = max(visual_floor, min(current, visual_ceiling))
 
 
 def _normalize_canvas(parsed, width, height, target_area=None):
@@ -1703,6 +1714,69 @@ def _marker_is_in_text_range(marker, text_value):
     )
 
 
+def _triangle_side_from_path(path):
+    """Return the visual direction of a small filled triangular CAD marker.
+
+    Text is normally placed beside a test-point arrow, but that relationship
+    is only a fallback: legends can deliberately place the label on either
+    side of the arrow.  For an actual solid triangle the geometry gives us an
+    unambiguous direction, including the left-facing sample in the legend.
+    """
+    raw_points = path.get("points") or []
+    if len(raw_points) < 3:
+        return None
+    xs = [float(point.get("x") or 0) for point in raw_points]
+    ys = [float(point.get("y") or 0) for point in raw_points]
+    extent = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+    merge_distance = extent * 0.03
+    vertices = []
+    for point in raw_points:
+        vertex = (float(point.get("x") or 0), float(point.get("y") or 0))
+        if not vertices or math.hypot(vertex[0] - vertices[-1][0], vertex[1] - vertices[-1][1]) > merge_distance:
+            vertices.append(vertex)
+    if len(vertices) > 1 and math.hypot(vertices[0][0] - vertices[-1][0], vertices[0][1] - vertices[-1][1]) <= merge_distance:
+        vertices.pop()
+    if len(vertices) != 3:
+        return None
+
+    # A CAD arrowhead is commonly much taller than it is wide.  Selecting the
+    # longest median in that case wrongly treats a rear corner as the tip.
+    # First use the defining triangle silhouette: one vertex on one horizontal
+    # extreme and two vertices on the opposite extreme means left/right.
+    vertex_xs = [vertex[0] for vertex in vertices]
+    vertex_ys = [vertex[1] for vertex in vertices]
+    extreme_tolerance = extent * 0.05
+    left_count = sum(abs(value - min(vertex_xs)) <= extreme_tolerance for value in vertex_xs)
+    right_count = sum(abs(value - max(vertex_xs)) <= extreme_tolerance for value in vertex_xs)
+    if left_count == 1 and right_count >= 2:
+        return "left"
+    if right_count == 1 and left_count >= 2:
+        return "right"
+    top_count = sum(abs(value - min(vertex_ys)) <= extreme_tolerance for value in vertex_ys)
+    bottom_count = sum(abs(value - max(vertex_ys)) <= extreme_tolerance for value in vertex_ys)
+    if top_count == 1 and bottom_count >= 2:
+        return "top"
+    if bottom_count == 1 and top_count >= 2:
+        return "bottom"
+
+    tip_index = max(
+        range(3),
+        key=lambda index: math.hypot(
+            vertices[index][0] - (vertices[(index + 1) % 3][0] + vertices[(index + 2) % 3][0]) / 2,
+            vertices[index][1] - (vertices[(index + 1) % 3][1] + vertices[(index + 2) % 3][1]) / 2,
+        ),
+    )
+    tip_x, tip_y = vertices[tip_index]
+    base = [vertices[index] for index in range(3) if index != tip_index]
+    base_x = (base[0][0] + base[1][0]) / 2
+    base_y = (base[0][1] + base[1][1]) / 2
+    delta_x = tip_x - base_x
+    delta_y = tip_y - base_y
+    if abs(delta_x) >= abs(delta_y):
+        return "right" if delta_x > 0 else "left"
+    return "bottom" if delta_y > 0 else "top"
+
+
 def _marker_target_from_text(text, paths):
     """将编号文字吸附到附近的小型填充标记；找不到时保留文字坐标。"""
     text_x = float(text.get("x") or 0)
@@ -1789,6 +1863,14 @@ def _marker_target_from_text(text, paths):
         side = "left" if delta_x > 0 else "right"
     else:
         side = "bottom" if delta_y < 0 else "top"
+    # Prefer the triangle's physical tip.  The relative label position is
+    # retained as a fallback for non-triangular markers and composite symbols.
+    triangle_side = next(
+        (resolved for part in marker_parts if (resolved := _triangle_side_from_path(part))),
+        None,
+    )
+    if triangle_side:
+        side = triangle_side
     _separate_overlapping_marker_label(text, combined_box, delta_x, delta_y)
     if side in {"top", "bottom"}:
         size = (combined_box["width"] / 18 + combined_box["height"] / 14) / 2
@@ -2052,8 +2134,11 @@ def finalize_existing_report_workspace(workspace, image_data_url=None, image_fil
     chrome_regions = _report_image_chrome_regions(width, height)
     chrome_regions["legend"] = _detect_legend_region(paths, texts, width, height)
     paths = _remove_metal_roof_legend_empty_frame(paths, texts, chrome_regions["legend"])
-    paths = _remove_duplicate_legend_hatch_frames(paths, texts, chrome_regions["legend"])
+    # Join compound filled-arrow halves before looking for duplicate legend
+    # frames.  Otherwise the lower half of a separately-handled test-point
+    # triangle is mistakenly discarded as a duplicate of the upper half.
     paths = _merge_legend_hatch_parts(paths, chrome_regions["legend"])
+    paths = _remove_duplicate_legend_hatch_frames(paths, texts, chrome_regions["legend"])
     paths = _deduplicate_region_paths(paths, chrome_regions["legend"])
     texts = _deduplicate_region_texts(texts, chrome_regions["legend"])
     paths = _remove_title_block_fill_artifacts(paths, chrome_regions["titleBlock"])
@@ -2483,15 +2568,70 @@ def _remove_duplicate_legend_hatch_frames(paths, texts, region):
 
 def _merge_legend_hatch_parts(paths, region):
     """Merge HATCH fragments expanded from one CAD handle into one legend icon."""
-    grouped = {}
-    for path in paths:
-        if str(path.get("name") or "").upper() != "HATCH":
-            continue
-        if not _box_center_in_region(_path_box(path), region):
-            continue
+    candidates = [
+        path for path in paths
+        if str(path.get("name") or "").upper() == "HATCH"
+        and _box_center_in_region(_path_box(path), region)
+    ]
+    parents = {id(path): id(path) for path in candidates}
+
+    def find(item_id):
+        while parents[item_id] != item_id:
+            parents[item_id] = parents[parents[item_id]]
+            item_id = parents[item_id]
+        return item_id
+
+    def union(left, right):
+        left_root = find(id(left))
+        right_root = find(id(right))
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    # Most HATCH boundary fragments retain a shared source handle.
+    by_handle = {}
+    for path in candidates:
         handles = tuple(sorted(str(value).upper() for value in path.get("importedSourceHandles") or []))
         if handles:
-            grouped.setdefault(handles, []).append(path)
+            by_handle.setdefault(handles, []).append(path)
+    for members in by_handle.values():
+        for member in members[1:]:
+            union(members[0], member)
+
+    # Some DWGs draw a filled arrow with two separately-handled triangles: an
+    # upper and a lower half sharing the same left/right tip.  They must be
+    # merged before the generic legend de-duplication, otherwise one half can
+    # survive as the visibly skewed triangle seen in the detection-point key.
+    for index, left in enumerate(candidates):
+        if str(left.get("fillStyle") or "") != "solid":
+            continue
+        left_side = _triangle_side_from_path(left)
+        if left_side not in {"left", "right"}:
+            continue
+        left_box = _path_box(left)
+        for right in candidates[index + 1:]:
+            if str(right.get("fillStyle") or "") != "solid" or _triangle_side_from_path(right) != left_side:
+                continue
+            right_box = _path_box(right)
+            overlap = min(left_box["x"] + left_box["width"], right_box["x"] + right_box["width"]) - max(left_box["x"], right_box["x"])
+            shared_width = min(left_box["width"], right_box["width"])
+            vertical_gap = max(left_box["y"], right_box["y"]) - min(
+                left_box["y"] + left_box["height"],
+                right_box["y"] + right_box["height"],
+            )
+            center_distance = abs(
+                left_box["y"] + left_box["height"] / 2
+                - right_box["y"] - right_box["height"] / 2
+            )
+            if (
+                overlap >= shared_width * 0.9
+                and vertical_gap <= max(1.0, min(left_box["height"], right_box["height"]) * 0.08)
+                and center_distance >= min(left_box["height"], right_box["height"]) * 0.35
+            ):
+                union(left, right)
+
+    grouped = {}
+    for path in candidates:
+        grouped.setdefault(find(id(path)), []).append(path)
 
     removed_ids = set()
     for members in grouped.values():
@@ -2501,6 +2641,24 @@ def _merge_legend_hatch_parts(paths, region):
         hull = _convex_hull(all_points)
         if len(hull) < 3:
             continue
+        triangle_sides = [_triangle_side_from_path(member) for member in members]
+        side_set = {side for side in triangle_sides if side in {"left", "right"}}
+        if len(side_set) == 1 and len(side_set) == len(set(triangle_sides)):
+            # CAD exporters frequently give the two arrow halves almost (but
+            # not exactly) the same tip coordinate.  A convex hull then has a
+            # tiny fourth corner.  Rebuild the icon from its bounds so it is a
+            # clean, symmetric, filled left/right triangle.
+            hull_xs = [float(point.get("x") or 0) for point in hull]
+            hull_ys = [float(point.get("y") or 0) for point in hull]
+            left_x, right_x = min(hull_xs), max(hull_xs)
+            top_y, bottom_y = min(hull_ys), max(hull_ys)
+            middle_y = (top_y + bottom_y) / 2
+            side = next(iter(side_set))
+            hull = (
+                [{"x": right_x, "y": top_y}, {"x": left_x, "y": middle_y}, {"x": right_x, "y": bottom_y}]
+                if side == "left"
+                else [{"x": left_x, "y": top_y}, {"x": right_x, "y": middle_y}, {"x": left_x, "y": bottom_y}]
+            )
         members[0]["points"] = hull
         members[0]["closed"] = True
         members[0]["fillStyle"] = "solid"

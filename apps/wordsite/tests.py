@@ -6,12 +6,13 @@ from docx import Document
 
 from apps.wordsite.scripts.generate_formatted_report import (
     expand_compact_subproject_category_column,
+    extract_legend_canvases,
     merge_subproject_category_columns,
     measurement_group_capacity,
     repeat_measurement_header_rows,
     trim_measurement_rows_to_fit,
 )
-from apps.wordsite.scripts.parse_formatted_report import parse_summary_table, parse_transition_row
+from apps.wordsite.scripts.parse_formatted_report import parse_subproject_table, parse_summary_table, parse_transition_row
 from apps.wordsite.scripts.parse_dwg_workspace import (
     _assign_interaction_groups,
     _cad_glyph_outlines_complete,
@@ -28,6 +29,7 @@ from apps.wordsite.scripts.parse_dwg_workspace import (
     _anchor_room_labels_to_enclosing_boxes,
     _separate_connector_identifier_labels,
     _separate_overlapping_marker_label,
+    _triangle_side_from_path,
     _wrapped_cad_text,
     finalize_existing_report_workspace,
     parse_dwg_workspace,
@@ -36,6 +38,60 @@ from apps.wordsite.scripts.parse_dwg_workspace import (
 
 # DWG/DXF 工作区解析测试：验证图纸文字与检测表记录共享 id，并保留未匹配记录。
 class DwgWorkspaceParserTests(SimpleTestCase):
+    def test_exports_each_child_drawing_as_a_separate_legend_canvas(self):
+        legend = {
+            "boardHeight": 600,
+            "boardWidth": 900,
+            "drawingGroups": [
+                {"height": 300, "id": "drawing-a", "name": "A图", "width": 400},
+                {"height": 320, "id": "drawing-b", "name": "B图", "width": 500},
+            ],
+            "paths": [
+                {"drawingId": "drawing-a", "points": [{"x": 10, "y": 10}]},
+                {"drawingId": "drawing-b", "points": [{"x": 20, "y": 20}]},
+            ],
+        }
+
+        canvases = extract_legend_canvases(legend)
+
+        self.assertEqual(len(canvases), 2)
+        self.assertEqual(canvases[0]["boardWidth"], 400)
+        self.assertEqual(canvases[1]["boardHeight"], 320)
+        self.assertEqual(canvases[0]["paths"][0]["drawingId"], "drawing-a")
+        self.assertEqual(canvases[1]["paths"][0]["drawingId"], "drawing-b")
+
+    def test_compact_overview_category_does_not_become_its_own_subcategory(self):
+        document = Document()
+        table = document.add_table(rows=3, cols=8)
+        table.cell(0, 3).text = "办公区"
+        table.cell(0, 6).text = "2025年3月7日"
+        table.cell(2, 0).text = "引 下 线"
+        table.cell(2, 1).text = ""
+        table.cell(2, 2).text = "对应接闪器"
+        table.cell(2, 4).text = "接闪带（网）"
+        table.cell(2, 5).text = "接闪带"
+        table.cell(2, 6).text = "符合"
+        table.cell(2, 0).merge(table.cell(2, 1))
+
+        project = parse_subproject_table(table)
+
+        self.assertEqual(project["rows"][0]["category"], "引 下 线")
+        self.assertEqual(project["rows"][0]["subcategory"], "")
+
+    def test_uses_triangle_geometry_for_left_facing_marker(self):
+        # The legend label sits to the right of this marker, but the imported
+        # solid triangle itself is what defines its direction.
+        path = {
+            "points": [
+                {"x": 10, "y": 0},
+                {"x": 0, "y": 5},
+                {"x": 10, "y": 10},
+                {"x": 10, "y": 0},
+            ],
+        }
+
+        self.assertEqual(_triangle_side_from_path(path), "left")
+
     def test_moves_sc_connector_identifier_above_its_box(self):
         texts = [{
             "fontSize": 10,
@@ -930,6 +986,38 @@ class DwgWorkspaceParserTests(SimpleTestCase):
 
         self.assertEqual([path["id"] for path in result], [1])
         self.assertEqual(result[0]["fillStyle"], "solid")
+
+    def test_merges_separately_handled_halves_of_legend_triangle(self):
+        upper = {
+            "closed": True,
+            "fillStyle": "solid",
+            "id": 1,
+            "importedSourceHandles": ["HATCH-UPPER"],
+            "name": "HATCH",
+            "points": [
+                {"x": 10, "y": 0}, {"x": 0, "y": 5},
+                {"x": 10, "y": 5}, {"x": 10, "y": 0},
+            ],
+        }
+        lower = {
+            "closed": True,
+            "fillStyle": "solid",
+            "id": 2,
+            "importedSourceHandles": ["HATCH-LOWER"],
+            "name": "HATCH",
+            "points": [
+                {"x": 10, "y": 5}, {"x": 0, "y": 5},
+                {"x": 10, "y": 10}, {"x": 10, "y": 5},
+            ],
+        }
+
+        result = _merge_legend_hatch_parts(
+            [upper, lower],
+            {"x": 0, "y": 0, "width": 40, "height": 40},
+        )
+
+        self.assertEqual([path["id"] for path in result], [1])
+        self.assertEqual(_triangle_side_from_path(result[0]), "left")
 
     def test_removes_only_large_polyline_outline_overlapping_hatch(self):
         hatch = {

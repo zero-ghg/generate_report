@@ -488,6 +488,13 @@ def parse_subproject_table(table):
             "result": cell_text(table, row_index, positions["result"]),
             "conclusion": cell_text(table, row_index, positions["conclusion"]),
         }
+        # In expanded overview tables, category-only rows merge the first two
+        # grid columns. python-docx exposes the merged value through both
+        # indexes, which previously produced e.g. "引下线 / 引下线" and made
+        # the editor render an unnecessary second category cell. It is one
+        # category with no subcategory, matching the source DOCX layout.
+        if normalize_text(row["category"]) == normalize_text(row["subcategory"]):
+            row["subcategory"] = ""
         if any(has_value(value) for value in row.values()):
             project["rows"].append(row)
     return project if project["rows"] else project if has_value(project["projectName"]) else None
