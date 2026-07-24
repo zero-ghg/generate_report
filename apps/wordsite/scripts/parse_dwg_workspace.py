@@ -557,13 +557,13 @@ class _DxfWorkspaceParser:
                     hatch_angles = [float(getattr(entity.dxf, "pattern_angle", 45) or 45) % 180]
                 item["hatchAngles"] = hatch_angles
                 item["hatchAngle"] = hatch_angles[0]
-                # ``pattern_scale`` is the CAD author's intended visual scale.
-                # The browser hatch renderer draws one full line for each unit of
-                # this value (rather than the short dash segments in a DXF
-                # pattern), so a little extra breathing room is needed to make
-                # a large ANSI hatch look like the source drawing instead of a
-                # dark, over-dense screen fill.
-                item["hatchSpacing"] = max(float(getattr(entity.dxf, "pattern_scale", 1) or 1) * 3.0, 0.5)
+                # The browser draws continuous lines rather than the source
+                # pattern's dash segments. Large ANSI31 areas therefore need
+                # a wider equivalent interval to retain the DWG's visual
+                # density after fitting the sheet to the board.
+                pattern_scale = float(getattr(entity.dxf, "pattern_scale", 1) or 1)
+                spacing_multiplier = 4.0 if item["patternName"].upper() == "ANSI31" else 3.0
+                item["hatchSpacing"] = max(pattern_scale * spacing_multiplier, 0.5)
 
     def _parse_simple_geometry(self, entity, handle, layer):
         entity_type = entity.dxftype()
@@ -685,12 +685,17 @@ def _normalize_hatch_pattern_spacing(paths):
         short_side = min(max(xs) - min(xs), max(ys) - min(ys))
         if short_side <= 0:
             continue
-        # The old fixed 24px ceiling made a large ANSI hatch unnaturally dense.
-        # A proportionate ceiling retains the DWG pattern's scale relationship
-        # while preventing very large source-unit scales from becoming blank
-        # regions after the drawing is fitted to the board.
+        # Preserve the source scale on large ANSI31 areas (for example a gas
+        # station canopy).  The former short-side/18 ceiling compressed these
+        # broad DWG hatches to 40–48px regardless of their CAD scale, making
+        # them visibly denser than the source drawing.
         visual_floor = max(3.0, min(12.0, short_side / 16.0))
-        visual_ceiling = max(12.0, min(48.0, short_side / 18.0))
+        is_large_ansi31 = str(path.get("patternName") or "").upper() == "ANSI31" and short_side >= 180
+        visual_ceiling = (
+            max(24.0, min(120.0, short_side / 8.0))
+            if is_large_ansi31
+            else max(12.0, min(48.0, short_side / 18.0))
+        )
         current = float(path.get("hatchSpacing") or visual_floor)
         path["hatchSpacing"] = max(visual_floor, min(current, visual_ceiling))
 
@@ -1283,10 +1288,12 @@ def _collapse_paired_flange_test_points(test_points, paths):
             and first_match.group(1).upper() == second_match.group(1).upper()
             and int(second_match.group(2)) == int(first_match.group(2)) + 1
             and first.get("reportType") == second.get("reportType")
-            # Flange pairs belong to the transition-resistance table.  A
-            # grounding-resistance drawing can have nearby/same-source labels
-            # too; collapsing those hides real, independent test points.
-            and first.get("reportType") in {"transition", "equipotentialBonding"}
+            # Transition-resistance drawings frequently place independent
+            # points on both sides of one flange symbol (D49/D50, D67/D68,
+            # etc.).  Those must remain two visible points.  Only the legacy
+            # equipotential-bonding table uses one physical flange symbol for
+            # a paired report row.
+            and first.get("reportType") == "equipotentialBonding"
             and ("法兰" in equipment_text or bool(shared_source_ids))
             and math.hypot(
                 float(first.get("x") or 0) - float(second.get("x") or 0),
@@ -1800,6 +1807,11 @@ def _marker_target_from_text(text, paths):
         height = max(ys) - min(ys)
         if not (1 <= width <= 20 and 1 <= height <= 20):
             continue
+        # A test-point marker is the arrow triangle itself.  Equipment such as
+        # black control-box squares can sit directly above that triangle but
+        # must never become part of the test-point interaction group.
+        if _triangle_side_from_path(path) is None:
+            continue
         center_x = (min(xs) + max(xs)) / 2
         center_y = (min(ys) + max(ys)) / 2
         distance = math.hypot(center_x - text_x, center_y - text_y)
@@ -1820,7 +1832,7 @@ def _marker_target_from_text(text, paths):
     marker_parts = [marker]
     combined_box = dict(marker_box)
     for _, _, _, candidate, candidate_box in candidates:
-        if candidate is marker or not _boxes_touch(combined_box, candidate_box, 0.75):
+        if candidate is marker or _triangle_side_from_path(candidate) is None or not _boxes_touch(combined_box, candidate_box, 0.75):
             continue
         marker_parts.append(candidate)
         combined_box = _union_boxes(combined_box, candidate_box)
@@ -1843,6 +1855,7 @@ def _marker_target_from_text(text, paths):
             or not path.get("closed")
             or len(path_points) < 3
             or len(path_points) > 5
+            or _triangle_side_from_path(path) is None
         ):
             continue
         path_box = _path_box(path)
@@ -2773,6 +2786,87 @@ def _remove_title_block_fill_artifacts(paths, region):
         if not is_title_block_hatch:
             result.append(path)
     return result
+
+
+def _use_recognized_project_text_in_title_block(texts, width, height):
+    """Prefer the decoded project name to unreliable CAD outline glyphs.
+
+    A few DWGs have stale/incorrect glyph outlines in the title block while
+    their TEXT value is correct (for example ``上高路加油站``).  The browser
+    normally prioritizes those outlines, which makes the on-screen project
+    name disagree with the parsed value.  Limit the fallback to the project
+    value cell so other CAD typography remains visually faithful.
+    """
+    for text in texts:
+        value = re.sub(r"\s+", "", str(text.get("text") or text.get("name") or ""))
+        box = _item_box(text)
+        # The imported-image crop can shift the detected title-block region,
+        # so use the stable lower-right sheet area rather than that crop.
+        is_title_value_area = box["x"] >= width * 0.55 and box["y"] >= height * 0.68
+        if "加油站" not in value or not is_title_value_area:
+            continue
+        text.pop("glyphPaths", None)
+        text.pop("glyphBounds", None)
+        text.pop("glyphFillRule", None)
+
+
+def _normalize_imported_compass_orientation(paths, texts, width, height):
+    """Turn a horizontal upper-left CAD compass into the vertical preview form.
+
+    Some source DWGs draw the north needle pointing left with ``N`` beside it.
+    The drawing board convention is a vertical needle with an upright ``N`` at
+    its tip.  Rotate only the compact needle geometry around its own centre;
+    the letter moves with the tip but deliberately remains upright.
+    """
+    upper_left_north_labels = []
+    for text in texts:
+        value = re.sub(r"\s+", "", str(text.get("text") or text.get("name") or "")).upper()
+        box = _item_box(text)
+        if value == "N" and box["x"] <= width * 0.22 and box["y"] <= height * 0.28:
+            upper_left_north_labels.append(text)
+
+    for label in upper_left_north_labels:
+        label_x = float(label.get("x") or 0)
+        label_y = float(label.get("y") or 0)
+        needle_paths = []
+        for path in paths:
+            box = _path_box(path)
+            if max(box["width"], box["height"]) > min(width, height) * 0.16:
+                continue
+            center_x = box["x"] + box["width"] / 2
+            center_y = box["y"] + box["height"] / 2
+            # The compass components sit tightly next to N.  A wider search
+            # can accidentally absorb the first equipment symbol below it.
+            if math.hypot(center_x - label_x, center_y - label_y) <= min(width, height) * 0.08:
+                needle_paths.append(path)
+        if not needle_paths:
+            continue
+
+        min_x = min(_path_box(path)["x"] for path in needle_paths)
+        min_y = min(_path_box(path)["y"] for path in needle_paths)
+        max_x = max(_path_box(path)["x"] + _path_box(path)["width"] for path in needle_paths)
+        max_y = max(_path_box(path)["y"] + _path_box(path)["height"] for path in needle_paths)
+        needle_width = max_x - min_x
+        needle_height = max_y - min_y
+        # A vertical needle is already in the desired form.  Restrict the
+        # correction to labels placed beside a clearly horizontal needle.
+        if needle_width <= needle_height * 1.25 or not (label_x >= max_x or label_x <= min_x):
+            continue
+
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+
+        def rotate_counterclockwise(x, y):
+            # SVG/canvas coordinates grow downwards, so -90° is visually CCW.
+            return center_x + (y - center_y), center_y - (x - center_x)
+
+        for path in needle_paths:
+            for point in path.get("points") or []:
+                point["x"], point["y"] = rotate_counterclockwise(
+                    float(point.get("x") or 0),
+                    float(point.get("y") or 0),
+                )
+        label["x"], label["y"] = rotate_counterclockwise(label_x, label_y)
 
 
 def _normalize_north_labels(texts, width, height):
