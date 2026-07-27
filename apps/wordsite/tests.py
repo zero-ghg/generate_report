@@ -78,6 +78,23 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         self.assertEqual(project["rows"][0]["category"], "引 下 线")
         self.assertEqual(project["rows"][0]["subcategory"], "")
 
+    def test_subproject_table_preserves_dash_placeholders(self):
+        document = Document()
+        table = document.add_table(rows=3, cols=8)
+        table.cell(0, 3).text = "辅助用房"
+        table.cell(0, 6).text = "2025年3月7日"
+        table.cell(2, 0).text = "低压电源系统"
+        table.cell(2, 2).text = "SPD安装位置"
+        table.cell(2, 4).text = "-"
+        table.cell(2, 5).text = "—"
+        table.cell(2, 7).text = "－"
+
+        project = parse_subproject_table(table)
+
+        self.assertEqual(project["rows"][0]["standard"], "—")
+        self.assertEqual(project["rows"][0]["result"], "—")
+        self.assertEqual(project["rows"][0]["conclusion"], "—")
+
     def test_uses_triangle_geometry_for_left_facing_marker(self):
         # The legend label sits to the right of this marker, but the imported
         # solid triangle itself is what defines its direction.

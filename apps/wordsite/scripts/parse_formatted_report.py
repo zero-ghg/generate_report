@@ -483,10 +483,10 @@ def parse_subproject_table(table):
         row = {
             "category": cell_text(table, row_index, positions["category"]) if positions["category"] is not None else "",
             "subcategory": cell_text(table, row_index, positions["subcategory"]) if positions["subcategory"] is not None else "",
-            "content": cell_text(table, row_index, positions["content"]),
-            "standard": cell_text(table, row_index, positions["standard"]),
-            "result": cell_text(table, row_index, positions["result"]),
-            "conclusion": cell_text(table, row_index, positions["conclusion"]),
+            "content": cell_placeholder_text(table, row_index, positions["content"]),
+            "standard": cell_placeholder_text(table, row_index, positions["standard"]),
+            "result": cell_placeholder_text(table, row_index, positions["result"]),
+            "conclusion": cell_placeholder_text(table, row_index, positions["conclusion"]),
         }
         # In expanded overview tables, category-only rows merge the first two
         # grid columns. python-docx exposes the merged value through both
