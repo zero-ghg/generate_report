@@ -3,6 +3,7 @@ from io import StringIO
 import ezdxf
 from django.test import SimpleTestCase
 from docx import Document
+from docx.shared import RGBColor
 
 from apps.wordsite.scripts.generate_formatted_report import (
     expand_compact_subproject_category_column,
@@ -94,6 +95,48 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         self.assertEqual(project["rows"][0]["standard"], "—")
         self.assertEqual(project["rows"][0]["result"], "—")
         self.assertEqual(project["rows"][0]["conclusion"], "—")
+
+    def test_subproject_table_preserves_red_field_markers(self):
+        document = Document()
+        table = document.add_table(rows=3, cols=8)
+        table.cell(0, 3).text = "辅助用房"
+        table.cell(0, 6).text = "2025年3月7日"
+        table.cell(2, 0).text = "低压电源系统"
+        table.cell(2, 2).text = "SPD外部脱离器"
+        red_cell = table.cell(2, 4)
+        red_cell.text = ""
+        run = red_cell.paragraphs[0].add_run("GB/T 21431-2023 5.5.6.7")
+        run.font.color.rgb = RGBColor(255, 0, 0)
+        table.cell(2, 5).text = "有/正常"
+        table.cell(2, 7).text = "符合"
+
+        project = parse_subproject_table(table)
+
+        self.assertEqual(project["rows"][0]["standard"], "GB/T 21431-2023 5.5.6.7")
+        self.assertEqual(project["rows"][0]["fieldColors"]["standard"], "#ff0000")
+
+    def test_subproject_table_preserves_partial_red_runs(self):
+        document = Document()
+        table = document.add_table(rows=3, cols=8)
+        table.cell(0, 3).text = "辅助用房"
+        table.cell(0, 6).text = "2025年3月7日"
+        table.cell(2, 0).text = "低压电源系统"
+        table.cell(2, 2).text = "SPD外观"
+        result_cell = table.cell(2, 5)
+        result_cell.text = ""
+        result_cell.paragraphs[0].add_run("表面平整，")
+        red_run = result_cell.paragraphs[0].add_run("无划伤")
+        red_run.font.color.rgb = RGBColor(255, 0, 0)
+        result_cell.paragraphs[0].add_run("。")
+        table.cell(2, 7).text = "符合"
+
+        project = parse_subproject_table(table)
+
+        self.assertEqual(project["rows"][0]["result"], "表面平整，无划伤。")
+        self.assertEqual(
+            project["rows"][0]["formattedFields"]["result"],
+            [{"text": "表面平整，"}, {"text": "无划伤", "color": "#ff0000"}, {"text": "。"}],
+        )
 
     def test_uses_triangle_geometry_for_left_facing_marker(self):
         # The legend label sits to the right of this marker, but the imported

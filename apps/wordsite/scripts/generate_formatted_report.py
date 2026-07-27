@@ -167,30 +167,52 @@ def update_cover_text(document, data):
         text = paragraph.text.strip()
         compact_text = re.sub(r"\s+", "", text)
         if cover_title and compact_text in {"雷电防护装置检测报告", "防雷检测报告"}:
-            set_paragraph_text_keep_format(paragraph, cover_title, paragraph.alignment)
+            set_paragraph_segments_keep_format(paragraph, row_field_segments(cover, "coverTitle") or [{"text": cover_title}], paragraph.alignment)
             continue
         if cover_title_en and text.startswith("Inspection report"):
-            set_paragraph_text_keep_format(paragraph, cover_title_en, paragraph.alignment)
+            set_paragraph_segments_keep_format(paragraph, row_field_segments(cover, "coverTitleEn") or [{"text": cover_title_en}], paragraph.alignment)
             continue
         if report_book_info and "第" in text and "册" in text and "共" in text:
-            set_paragraph_text_keep_format(paragraph, report_book_info, paragraph.alignment)
+            set_paragraph_segments_keep_format(paragraph, row_field_segments(cover, "reportBookInfo") or [{"text": report_book_info}], paragraph.alignment)
             continue
         if should_replace_cover_agency_title(compact_text, cover):
-            set_paragraph_text_keep_format(paragraph, cover_value(cover, "inspectorName", "agencyName"), paragraph.alignment)
+            agency_name = cover_value(cover, "inspectorName", "agencyName")
+            set_paragraph_segments_keep_format(paragraph, row_field_segments(cover, "inspectorName") or [{"text": agency_name}], paragraph.alignment)
             continue
         for label, replacement in replacements.items():
             if text.startswith(label):
                 matched_label = cover_matched_label(text, label)
+                field_name = cover_field_name_for_label(label)
                 if label == "报告编号":
-                    replace_cover_report_number(paragraph, matched_label, replacement or "")
+                    replace_cover_report_number(paragraph, matched_label, replacement or "", row_field_segments(cover, field_name))
                     continue
                 replacement = cover_value_with_template_suffix(text, matched_label, replacement or "")
-                replace_cover_paragraph_with_underlined_value(paragraph, matched_label, replacement)
+                replace_cover_paragraph_with_underlined_value(paragraph, matched_label, replacement, row_field_segments(cover, field_name))
 
 
 def cover_data(data):
     cover = data.get("cover", {})
     return cover if isinstance(cover, dict) else {}
+
+
+def cover_field_name_for_label(label):
+    return {
+        "报告编号": "reportNumber",
+        "委托单位名称": "clientName",
+        "受检项目名称": "projectName",
+        "受检项目地址": "projectAddress",
+        "联   系   人": "contactName",
+        "联 系 人": "contactName",
+        "联系人": "contactName",
+        "电        话": "phone",
+        "电    话": "phone",
+        "电话": "phone",
+        "本次检测时间": "currentInspectionDate",
+        "下次检测时间": "nextInspectionDate",
+        "检测机构名称": "inspectorName",
+        "检测机构地址": "inspectorAddress",
+        "检测机构电话": "inspectorPhone",
+    }.get(label, label)
 
 
 def should_replace_cover_agency_title(compact_text, cover):
@@ -205,7 +227,8 @@ def should_replace_cover_agency_title(compact_text, cover):
 
 
 def update_statement_text(document, data):
-    content = cover_value(cover_data(data), "statementContent")
+    cover = cover_data(data)
+    content = cover_value(cover, "statementContent")
     if not content:
         return
 
@@ -227,14 +250,16 @@ def update_statement_text(document, data):
             break
 
     lines = statement_content_lines(content)
+    formatted_lines = cover.get("statementFormattedLines") if isinstance(cover.get("statementFormattedLines"), list) else []
     slots = [paragraph for paragraph in paragraphs[start_index:end_index] if paragraph.text.strip()]
     for index, paragraph in enumerate(slots):
         text = lines[index] if index < len(lines) else ""
         remove_paragraph_numbering(paragraph)
-        set_statement_paragraph_text_keep_format(paragraph, text, index)
+        line_segments = formatted_lines[index] if index < len(formatted_lines) and isinstance(formatted_lines[index], list) else None
+        set_statement_paragraph_text_keep_format(paragraph, text, index, line_segments)
 
 
-def set_statement_paragraph_text_keep_format(paragraph, text, index):
+def set_statement_paragraph_text_keep_format(paragraph, text, index, segments=None):
     template_rpr = first_paragraph_run_properties(paragraph)
     alignment = paragraph.alignment
     paragraph_format = paragraph.paragraph_format
@@ -248,10 +273,7 @@ def set_statement_paragraph_text_keep_format(paragraph, text, index):
     paragraph.paragraph_format.space_before = space_before or Pt(0)
     paragraph.paragraph_format.space_after = space_after or Pt(0)
     paragraph.paragraph_format.line_spacing = 1.5
-    run = paragraph.add_run(text)
-    if template_rpr is not None:
-        run._r.insert(0, deepcopy(template_rpr))
-    set_run_font(run, size=None, bold=False)
+    add_paragraph_segments(paragraph, segments or [{"text": text}], template_rpr, bold=False)
 
 
 def statement_paragraph_indent(text, index):
@@ -306,7 +328,7 @@ def cover_value(general, *keys):
     return ""
 
 
-def replace_cover_report_number(paragraph, label, report_number):
+def replace_cover_report_number(paragraph, label, report_number, segments=None):
     template_rpr = first_paragraph_run_properties(paragraph)
     clear_paragraph_runs(paragraph)
 
@@ -319,15 +341,7 @@ def replace_cover_report_number(paragraph, label, report_number):
         bold=bool(label_run.bold) if label_run.bold is not None else None,
     )
 
-    value_run = paragraph.add_run(str(report_number or ""))
-    if template_rpr is not None:
-        value_run._r.insert(0, deepcopy(template_rpr))
-    set_run_font(
-        value_run,
-        size=value_run.font.size.pt if value_run.font.size else None,
-        bold=bool(value_run.bold) if value_run.bold is not None else None,
-    )
-    value_run.font.color.rgb = RGBColor(255, 0, 0)
+    add_paragraph_segments(paragraph, segments or [{"text": str(report_number or "")}], template_rpr, bold=False)
 
 
 def iter_all_paragraphs(document):
@@ -341,7 +355,22 @@ def paragraph_element_to_paragraph(paragraph_element):
     return Paragraph(paragraph_element, None)
 
 
-def replace_cover_paragraph_with_underlined_value(paragraph, label, replacement):
+def add_paragraph_segments(paragraph, segments, template_rpr=None, underline=False, bold=False):
+    for segment in segments:
+        text = segment.get("text", "") if isinstance(segment, dict) else str(segment)
+        if text == "":
+            continue
+        run = paragraph.add_run(text)
+        if template_rpr is not None:
+            run._r.insert(0, deepcopy(template_rpr))
+        set_run_font(run, size=run.font.size.pt if run.font.size else None, bold=bold)
+        run.underline = underline
+        color = segment.get("color") if isinstance(segment, dict) else None
+        if isinstance(color, str) and color.lower() in {"#ff0000", "ff0000", "red"}:
+            run.font.color.rgb = RGBColor(255, 0, 0)
+
+
+def replace_cover_paragraph_with_underlined_value(paragraph, label, replacement, segments=None):
     template_rpr = first_paragraph_run_properties(paragraph)
     value, suffix = split_cover_suffix(str(replacement))
     for child in list(paragraph._p):
@@ -354,11 +383,7 @@ def replace_cover_paragraph_with_underlined_value(paragraph, label, replacement)
         label_run._r.insert(0, deepcopy(template_rpr))
     set_run_font(label_run, size=label_run.font.size.pt if label_run.font.size else None, bold=bool(label_run.bold) if label_run.bold is not None else None)
 
-    value_run = paragraph.add_run(value)
-    if template_rpr is not None:
-        value_run._r.insert(0, deepcopy(template_rpr))
-    set_run_font(value_run, size=value_run.font.size.pt if value_run.font.size else None, bold=bool(value_run.bold) if value_run.bold is not None else None)
-    value_run.underline = True
+    add_paragraph_segments(paragraph, segments or [{"text": value}], template_rpr, underline=True)
 
     tab_run = paragraph.add_run()
     if template_rpr is not None:
@@ -906,74 +931,74 @@ def fill_summary_table(table, data):
         trim_summary_optional_rows(table, len(equipment), len(project_items))
         return
 
-    set_cell(table.cell(0, 3), summary_value(general.get("clientName")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(1, 3), summary_value(general.get("projectName")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(2, 3), summary_value(general.get("projectAddress")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(3, 3), summary_value(general.get("contactDepartment")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(3, 6), summary_value(general.get("contactName")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(3, 14), summary_value(general.get("contactPhone")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(4, 3), summary_value(general.get("inspectedDate")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(5, 3), summary_value(general.get("nextDate")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(5, 11), summary_value(general.get("detectionType")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(6, 3), summary_value(general.get("detectionBasis")), align=WD_ALIGN_PARAGRAPH.LEFT, empty_text="")
+    set_summary_field_cell(table.cell(0, 3), general, "clientName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(1, 3), general, "projectName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(2, 3), general, "projectAddress", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(3, 3), general, "contactDepartment", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(3, 6), general, "contactName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(3, 14), general, "contactPhone", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(4, 3), general, "inspectedDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(5, 3), general, "nextDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(5, 11), general, "detectionType", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(6, 3), general, "detectionBasis", align=WD_ALIGN_PARAGRAPH.LEFT, empty_text="")
 
     for row_index in range(8, 14):
         item = equipment[row_index - 8] if row_index - 8 < len(equipment) else {}
-        set_cell(table.cell(row_index, 1), summary_value(item.get("name")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 4), summary_value(item.get("model")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 7), summary_value(item.get("serial")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 10), summary_value(item.get("range")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 14), summary_value(item.get("calibrationDate")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 1), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 4), item, "model", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 7), item, "serial", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 10), item, "range", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 14), item, "calibrationDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
 
     for row_index in range(16, 27):
         item = project_items[row_index - 16] if row_index - 16 < len(project_items) else {}
-        set_cell(table.cell(row_index, 0), summary_value(item.get("id")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 2), summary_value(item.get("name")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 5), summary_value(item.get("lightningCategory")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 9), summary_value(item.get("lightningProtectionLevel")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 13), summary_value(item.get("pages")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 0), item, "id", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 2), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 5), item, "lightningCategory", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 9), item, "lightningProtectionLevel", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 13), item, "pages", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
 
     fill_summary_conclusion_cell(table.cell(27, 2), general.get("conclusion"))
-    set_cell(table.cell(28, 2), signature_value(summary_value(general.get("tester"))), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(28, 8), signature_value(summary_value(general.get("reviewer"))), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(28, 15), signature_value(summary_value(general.get("signer"))), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(28, 2), general, "tester", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(28, 8), general, "reviewer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(28, 15), general, "signer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
     trim_summary_optional_rows(table, len(equipment), len(project_items))
 
 
 def fill_summary_table_compact(table, general, project_items, equipment):
-    set_cell(table.cell(0, 3), summary_value(general.get("clientName")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(1, 3), summary_value(general.get("projectName")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(2, 3), summary_value(general.get("projectAddress")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(3, 3), summary_value(general.get("contactDepartment")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(3, 8), summary_value(general.get("contactName")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(3, 15), summary_value(general.get("contactPhone")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(4, 3), summary_value(general.get("inspectedDate")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(5, 3), summary_value(general.get("nextDate")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(5, 12), summary_value(general.get("detectionType")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_cell(table.cell(6, 3), summary_value(general.get("detectionBasis")), align=WD_ALIGN_PARAGRAPH.LEFT, empty_text="")
+    set_summary_field_cell(table.cell(0, 3), general, "clientName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(1, 3), general, "projectName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(2, 3), general, "projectAddress", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(3, 3), general, "contactDepartment", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(3, 8), general, "contactName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(3, 15), general, "contactPhone", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(4, 3), general, "inspectedDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(5, 3), general, "nextDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(5, 12), general, "detectionType", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(6, 3), general, "detectionBasis", align=WD_ALIGN_PARAGRAPH.LEFT, empty_text="")
 
     for row_index in range(8, min(14, len(table.rows))):
         item = equipment[row_index - 8] if row_index - 8 < len(equipment) else {}
-        set_cell(table.cell(row_index, 1), summary_value(item.get("name")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 4), summary_value(item.get("model")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 5), summary_value(item.get("serial")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 11), summary_value(item.get("range")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 15), summary_value(item.get("calibrationDate")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 1), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 4), item, "model", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 5), item, "serial", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 11), item, "range", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 15), item, "calibrationDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
 
     for row_index in range(16, min(19, len(table.rows))):
         item = project_items[row_index - 16] if row_index - 16 < len(project_items) else {}
-        set_cell(table.cell(row_index, 0), summary_value(item.get("id")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 2), summary_value(item.get("name")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 6), summary_value(item.get("lightningCategory")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 10), summary_value(item.get("lightningProtectionLevel")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, 14), summary_value(item.get("pages")), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 0), item, "id", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 2), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 6), item, "lightningCategory", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 10), item, "lightningProtectionLevel", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 14), item, "pages", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
 
     if len(table.rows) > 19:
         fill_summary_conclusion_cell(table.cell(19, 2), general.get("conclusion"))
     if len(table.rows) > 20:
-        set_cell(table.cell(20, 2), signature_value(summary_value(general.get("tester"))), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(20, 9), signature_value(summary_value(general.get("reviewer"))), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(20, 16), signature_value(summary_value(general.get("signer"))), align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(20, 2), general, "tester", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(20, 9), general, "reviewer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(20, 16), general, "signer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
 
 
 def meaningful_summary_items(items, content_keys):
@@ -1000,6 +1025,16 @@ def signature_value(value):
     if compact_text and set(compact_text) == {"?"}:
         return None
     return value
+
+
+def set_summary_field_cell(cell, source, field, transform=None, align=WD_ALIGN_PARAGRAPH.LEFT, empty_text=EMPTY):
+    raw_value = summary_value(source.get(field))
+    value = transform(raw_value) if transform else raw_value
+    segments = row_field_segments(source, field)
+    if segments and transform is None:
+        set_cell_segments(cell, segments, align=align, empty_text=empty_text)
+        return
+    set_cell(cell, value, align=align, empty_text=empty_text, color=row_field_color(source, field))
 
 
 def fill_summary_conclusion_cell(cell, conclusion):
@@ -1041,6 +1076,16 @@ def set_paragraph_text_keep_format(paragraph, text, alignment):
     if template_rpr is not None:
         run._r.insert(0, deepcopy(template_rpr))
     set_run_font(run, size=None, bold=False)
+
+
+def set_paragraph_segments_keep_format(paragraph, segments, alignment):
+    template_rpr = first_paragraph_run_properties(paragraph)
+    clear_paragraph_runs(paragraph)
+    paragraph.alignment = alignment
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = 1
+    add_paragraph_segments(paragraph, segments, template_rpr, bold=False)
 
 
 def summary_conclusion_parts(conclusion):
@@ -1192,15 +1237,19 @@ def add_subproject_table(document, project, data, template_table, has_section_he
     reset_subproject_template_merges(table, 2, len(rows), positions)
     row_meta = []
 
-    set_cell(
+    set_subproject_field_cell(
         table.cell(0, positions["name"]),
+        project,
+        "projectName",
         subproject_name(project, data),
         bold=True,
         align=WD_ALIGN_PARAGRAPH.CENTER,
         empty_text="",
     )
-    set_cell(
+    set_subproject_field_cell(
         table.cell(0, positions["date"]),
+        project,
+        "inspectionDate",
         project.get("inspectionDate"),
         bold=True,
         align=WD_ALIGN_PARAGRAPH.CENTER,
@@ -1219,21 +1268,39 @@ def add_subproject_table(document, project, data, template_table, has_section_he
         row_meta.append((category, subcategory))
         if positions.get("category") is not None:
             category_cell = table.cell(row_index, positions["category"])
-            set_cell(category_cell, category, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+            set_cell(
+                category_cell,
+                category,
+                bold=True,
+                align=WD_ALIGN_PARAGRAPH.CENTER,
+                empty_text="",
+                color=row_field_color(row_data, "category"),
+            )
         if positions.get("subcategory") is not None:
             subcategory_cell = table.cell(row_index, positions["subcategory"])
             if positions.get("category") is None or subcategory_cell._tc is not table.cell(row_index, positions["category"])._tc:
-                set_cell(subcategory_cell, subcategory, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_cell(table.cell(row_index, positions["content"]), content, bold=True, empty_text="")
-        set_cell(table.cell(row_index, positions["standard"]), standard, empty_text="")
-        set_cell(
+                set_cell(
+                    subcategory_cell,
+                    subcategory,
+                    bold=True,
+                    align=WD_ALIGN_PARAGRAPH.CENTER,
+                    empty_text="",
+                    color=row_field_color(row_data, "subcategory"),
+                )
+        set_subproject_field_cell(table.cell(row_index, positions["content"]), row_data, "content", content, bold=True, empty_text="")
+        set_subproject_field_cell(table.cell(row_index, positions["standard"]), row_data, "standard", standard, empty_text="")
+        set_subproject_field_cell(
             table.cell(row_index, positions["result"]),
+            row_data,
+            "result",
             row_data.get("result"),
             align=WD_ALIGN_PARAGRAPH.CENTER,
             empty_text="",
         )
-        set_cell(
+        set_subproject_field_cell(
             table.cell(row_index, positions["conclusion"]),
+            row_data,
+            "conclusion",
             row_data.get("conclusion"),
             align=WD_ALIGN_PARAGRAPH.CENTER,
             empty_text="",
@@ -1352,6 +1419,36 @@ def display_row_standard(row_data):
     if has_value(standard):
         return standard
     return standard
+
+
+def row_field_color(row_data, field):
+    color = (row_data.get("fieldColors") or {}).get(field)
+    if isinstance(color, str) and color.lower() in {"#ff0000", "ff0000", "red"}:
+        return RGBColor(255, 0, 0)
+    return None
+
+
+def row_field_segments(row_data, field):
+    segments = (row_data.get("formattedFields") or {}).get(field)
+    if not isinstance(segments, list):
+        return None
+    cleaned = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        text = segment.get("text")
+        if text is None or text == "":
+            continue
+        cleaned.append({"text": str(text), "color": segment.get("color")})
+    return cleaned or None
+
+
+def set_subproject_field_cell(cell, row_data, field, fallback_text, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, empty_text=EMPTY):
+    segments = row_field_segments(row_data, field)
+    if segments:
+        set_cell_segments(cell, segments, bold=bold, align=align, empty_text=empty_text)
+        return
+    set_cell(cell, fallback_text, bold=bold, align=align, empty_text=empty_text, color=row_field_color(row_data, field))
 
 
 def template_cell_text(table, row_index, col_index):
@@ -2620,6 +2717,7 @@ def set_cell(
     size=None,
     line_spacing=1,
     empty_text=EMPTY,
+    color=None,
 ):
     template_rpr = first_cell_run_properties(cell)
     is_empty = text is None or text == ""
@@ -2638,6 +2736,47 @@ def set_cell(
         if template_rpr is not None and size is None:
             run._r.insert(0, deepcopy(template_rpr))
         set_run_font(run, size=size, bold=bold)
+        if color is not None:
+            run.font.color.rgb = color
+
+
+def set_cell_segments(
+    cell,
+    segments,
+    bold=False,
+    align=WD_ALIGN_PARAGRAPH.LEFT,
+    size=None,
+    line_spacing=1,
+    empty_text=EMPTY,
+):
+    template_rpr = first_cell_run_properties(cell)
+    rendered_segments = [
+        {"text": normalize_dash_text(str(segment.get("text", ""))), "color": segment.get("color")}
+        for segment in segments
+        if str(segment.get("text", "")) != ""
+    ]
+    if not rendered_segments:
+        rendered_segments = [{"text": empty_text, "color": None}]
+    if len(rendered_segments) == 1 and rendered_segments[0]["text"] == EMPTY:
+        align = WD_ALIGN_PARAGRAPH.CENTER
+    cell.text = ""
+    paragraph = cell.paragraphs[0]
+    paragraph.alignment = align
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = line_spacing
+    for segment in rendered_segments:
+        parts = str(segment["text"]).splitlines()
+        for index, part in enumerate(parts):
+            if index:
+                paragraph.add_run().add_break()
+            run = paragraph.add_run(part)
+            if template_rpr is not None and size is None:
+                run._r.insert(0, deepcopy(template_rpr))
+            set_run_font(run, size=size, bold=bold)
+            color = segment.get("color")
+            if isinstance(color, str) and color.lower() in {"#ff0000", "ff0000", "red"}:
+                run.font.color.rgb = RGBColor(255, 0, 0)
 
 
 def first_cell_run_properties(cell):

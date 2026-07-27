@@ -173,6 +173,7 @@ def detect_section(text):
 def parse_cover_paragraphs(document, toc_seen):
     general = {}
     statement_lines = []
+    statement_formatted_lines = []
     in_statement = False
     for paragraph in document.paragraphs:
         text = normalize_text(paragraph.text)
@@ -186,6 +187,8 @@ def parse_cover_paragraphs(document, toc_seen):
             continue
         if in_statement:
             statement_lines.append(text)
+            segments = paragraph_rich_segments(paragraph)
+            statement_formatted_lines.append(segments if any(segment.get("color") == "#ff0000" for segment in segments) else [{"text": text}])
         for label, field_name in COVER_LABELS.items():
             if not text.startswith(label):
                 continue
@@ -193,16 +196,24 @@ def parse_cover_paragraphs(document, toc_seen):
             value = re.sub(r"（盖章）.*$", "", value).strip()
             if has_value(value):
                 general[field_name] = value
+                apply_rich_field(general, field_name, segments_after_text_prefix(paragraph_rich_segments(paragraph), text[: len(label)]))
         if text.startswith("报告编号"):
             general["reportNumber"] = normalize_text(text.split("：", 1)[-1])
+            prefix = text.split("：", 1)[0] + ("：" if "：" in text else "")
+            apply_rich_field(general, "reportNumber", segments_after_text_prefix(paragraph_rich_segments(paragraph), prefix))
         elif text.startswith("（第") and "册" in text:
             general["reportBookInfo"] = text
+            apply_rich_field(general, "reportBookInfo", paragraph_rich_segments(paragraph))
         elif text == "雷电防护装置检测报告":
             general["coverTitle"] = text
+            apply_rich_field(general, "coverTitle", paragraph_rich_segments(paragraph))
         elif text.lower().startswith("inspection report"):
             general["coverTitleEn"] = text
+            apply_rich_field(general, "coverTitleEn", paragraph_rich_segments(paragraph))
     if statement_lines:
         general["statementContent"] = "\n".join(statement_lines)
+    if any(any(segment.get("color") == "#ff0000" for segment in line) for line in statement_formatted_lines):
+        general["statementFormattedLines"] = statement_formatted_lines
     return general
 
 
@@ -228,6 +239,19 @@ def parse_summary_table_compact(table):
         "equipment": [],
         "projectItems": [],
     }
+    for field, row_index, col_index in (
+        ("clientName", 0, 3),
+        ("projectName", 1, 3),
+        ("projectAddress", 2, 3),
+        ("contactDepartment", 3, 3),
+        ("contactName", 3, 7),
+        ("contactPhone", 3, 15),
+        ("inspectedDate", 4, 3),
+        ("nextDate", 5, 3),
+        ("detectionType", 5, 12),
+        ("detectionBasis", 6, 3),
+    ):
+        apply_rich_field_from_cell(general, table, row_index, col_index, field)
 
     section = None
     equipment_columns = {"name": 1, "model": 4, "serial": 7, "range": 9, "calibrationDate": 12}
@@ -305,6 +329,8 @@ def parse_summary_table_compact(table):
                 key: cell_text(table, row_index, column)
                 for key, column in equipment_columns.items()
             }
+            for key, column in equipment_columns.items():
+                apply_rich_field_from_cell(item, table, row_index, column, key)
             if item["name"] in {"检测项目列表", "检测子项目列表"}:
                 section = "project_header"
                 continue
@@ -317,6 +343,8 @@ def parse_summary_table_compact(table):
                 key: cell_text(table, row_index, column)
                 for key, column in project_columns.items()
             }
+            for key, column in project_columns.items():
+                apply_rich_field_from_cell(item, table, row_index, column, key)
             if any(has_value(value) for value in item.values()):
                 general["projectItems"].append(item)
 
@@ -338,6 +366,19 @@ def parse_summary_table_full(table):
         "equipment": [],
         "projectItems": [],
     }
+    for field, row_index, col_index in (
+        ("clientName", 0, 3),
+        ("projectName", 1, 3),
+        ("projectAddress", 2, 3),
+        ("contactDepartment", 3, 3),
+        ("contactName", 3, 6),
+        ("contactPhone", 3, 14),
+        ("inspectedDate", 4, 3),
+        ("nextDate", 5, 3),
+        ("detectionType", 5, 11),
+        ("detectionBasis", 6, 3),
+    ):
+        apply_rich_field_from_cell(general, table, row_index, col_index, field)
 
     for row_index in range(8, min(14, len(table.rows))):
         item = {
@@ -347,6 +388,8 @@ def parse_summary_table_full(table):
             "range": cell_text(table, row_index, 10),
             "calibrationDate": cell_text(table, row_index, 14),
         }
+        for key, column in {"name": 1, "model": 4, "serial": 7, "range": 10, "calibrationDate": 14}.items():
+            apply_rich_field_from_cell(item, table, row_index, column, key)
         if any(has_value(value) for value in item.values()):
             general["equipment"].append(item)
 
@@ -361,6 +404,8 @@ def parse_summary_table_full(table):
             "lightningProtectionLevel": cell_text(table, row_index, 9),
             "pages": cell_text(table, row_index, 13),
         }
+        for key, column in {"id": 0, "name": 2, "lightningCategory": 5, "lightningProtectionLevel": 9, "pages": 13}.items():
+            apply_rich_field_from_cell(item, table, row_index, column, key)
         if any(has_value(value) for value in item.values()):
             general["projectItems"].append(item)
 
@@ -373,15 +418,20 @@ def parse_summary_footer(table, general, compact):
     signature_row = 20 if compact else 28
     if len(table.rows) > conclusion_row:
         general["conclusion"] = parse_conclusion_cell(table, conclusion_row, 2)
+        apply_rich_field_from_cell(general, table, conclusion_row, 2, "conclusion")
     if len(table.rows) > signature_row:
         if compact:
             general["tester"] = cell_text(table, signature_row, 2)
             general["reviewer"] = cell_text(table, signature_row, 9)
             general["signer"] = cell_text(table, signature_row, 16)
+            for field, column in (("tester", 2), ("reviewer", 9), ("signer", 16)):
+                apply_rich_field_from_cell(general, table, signature_row, column, field)
         else:
             general["tester"] = cell_text(table, signature_row, 2)
             general["reviewer"] = cell_text(table, signature_row, 8)
             general["signer"] = cell_text(table, signature_row, 15)
+            for field, column in (("tester", 2), ("reviewer", 8), ("signer", 15)):
+                apply_rich_field_from_cell(general, table, signature_row, column, field)
     return general
 
 
@@ -471,6 +521,18 @@ def parse_subproject_table(table):
         "inspectionDate": cell_text(table, 0, positions["date"]),
         "rows": [],
     }
+    project_field_colors = {}
+    project_formatted_fields = {}
+    for field, column in (("projectName", positions["name"]), ("inspectionDate", positions["date"])):
+        if cell_has_red_text(table, 0, column):
+            project_field_colors[field] = "#ff0000"
+            segments = cell_rich_segments(table, 0, column)
+            if segments:
+                project_formatted_fields[field] = segments
+    if project_field_colors:
+        project["fieldColors"] = project_field_colors
+    if project_formatted_fields:
+        project["formattedFields"] = project_formatted_fields
     if not has_value(project["projectName"]) and not has_value(project["inspectionDate"]):
         return None
 
@@ -488,6 +550,7 @@ def parse_subproject_table(table):
             "result": cell_placeholder_text(table, row_index, positions["result"]),
             "conclusion": cell_placeholder_text(table, row_index, positions["conclusion"]),
         }
+        apply_subproject_field_colors(table, row_index, positions, row)
         # In expanded overview tables, category-only rows merge the first two
         # grid columns. python-docx exposes the merged value through both
         # indexes, which previously produced e.g. "引下线 / 引下线" and made
@@ -913,6 +976,146 @@ def cell_placeholder_text(table, row_index, col_index):
     if value in EMPTY_VALUES:
         return "—" if value else ""
     return value
+
+
+def cell_has_red_text(table, row_index, col_index):
+    try:
+        cell = table.cell(row_index, col_index)
+    except IndexError:
+        return False
+    for paragraph in cell.paragraphs:
+        for run in paragraph.runs:
+            if not normalize_text(run.text):
+                continue
+            color = run.font.color
+            rgb = getattr(color, "rgb", None) if color is not None else None
+            if rgb is None:
+                continue
+            value = str(rgb).upper()
+            if len(value) != 6:
+                continue
+            try:
+                red = int(value[0:2], 16)
+                green = int(value[2:4], 16)
+                blue = int(value[4:6], 16)
+            except ValueError:
+                continue
+            if red >= 180 and green <= 90 and blue <= 90:
+                return True
+    return False
+
+
+def paragraph_rich_segments(paragraph):
+    segments = []
+    for run in paragraph.runs:
+        if not run.text:
+            continue
+        color = "#ff0000" if run_is_red(run) else None
+        previous = segments[-1] if segments else None
+        if previous and previous.get("color") == color:
+            previous["text"] += run.text
+        else:
+            segment = {"text": run.text}
+            if color:
+                segment["color"] = color
+            segments.append(segment)
+    return segments or [{"text": normalize_text(paragraph.text)}]
+
+
+def segments_after_text_prefix(segments, prefix):
+    remaining = len(prefix)
+    result = []
+    for segment in segments:
+        text = segment.get("text", "")
+        if remaining >= len(text):
+            remaining -= len(text)
+            continue
+        next_text = text[remaining:].lstrip(" ：:")
+        remaining = 0
+        if not next_text:
+            continue
+        next_segment = {"text": next_text}
+        if segment.get("color"):
+            next_segment["color"] = segment["color"]
+        result.append(next_segment)
+    return result
+
+
+def apply_rich_field(target, field, segments):
+    cleaned = [segment for segment in segments if normalize_text(segment.get("text", ""))]
+    if not any(segment.get("color") == "#ff0000" for segment in cleaned):
+        return
+    target.setdefault("fieldColors", {})[field] = "#ff0000"
+    target.setdefault("formattedFields", {})[field] = cleaned
+
+
+def apply_rich_field_from_cell(target, table, row_index, col_index, field):
+    segments = cell_rich_segments(table, row_index, col_index)
+    if segments:
+        apply_rich_field(target, field, segments)
+
+
+def run_is_red(run):
+    color = run.font.color
+    rgb = getattr(color, "rgb", None) if color is not None else None
+    if rgb is None:
+        return False
+    value = str(rgb).upper()
+    if len(value) != 6:
+        return False
+    try:
+        red = int(value[0:2], 16)
+        green = int(value[2:4], 16)
+        blue = int(value[4:6], 16)
+    except ValueError:
+        return False
+    return red >= 180 and green <= 90 and blue <= 90
+
+
+def cell_rich_segments(table, row_index, col_index):
+    try:
+        cell = table.cell(row_index, col_index)
+    except IndexError:
+        return None
+    segments = []
+    for paragraph_index, paragraph in enumerate(cell.paragraphs):
+        if paragraph_index:
+            previous = segments[-1] if segments else None
+            if previous:
+                previous["text"] += "\n"
+            else:
+                segments.append({"text": "\n"})
+        for run in paragraph.runs:
+            text = run.text
+            if not text:
+                continue
+            color = "#ff0000" if run_is_red(run) else None
+            previous = segments[-1] if segments else None
+            if previous and previous.get("color") == color:
+                previous["text"] += text
+            else:
+                segment = {"text": text}
+                if color:
+                    segment["color"] = color
+                segments.append(segment)
+    has_red = any(segment.get("color") == "#ff0000" for segment in segments)
+    return segments if has_red else None
+
+
+def apply_subproject_field_colors(table, row_index, positions, row):
+    field_colors = {}
+    formatted_fields = {}
+    for field in ("category", "subcategory", "content", "standard", "result", "conclusion"):
+        column = positions.get(field)
+        if column is not None and cell_has_red_text(table, row_index, column):
+            field_colors[field] = "#ff0000"
+            segments = cell_rich_segments(table, row_index, column)
+            if segments:
+                formatted_fields[field] = segments
+    if field_colors:
+        row["fieldColors"] = field_colors
+    if formatted_fields:
+        row["formattedFields"] = formatted_fields
 
 
 def clean_value(text):
