@@ -2155,7 +2155,7 @@ def finalize_existing_report_workspace(workspace, image_data_url=None, image_fil
     paths = _deduplicate_region_paths(paths, chrome_regions["legend"])
     texts = _deduplicate_region_texts(texts, chrome_regions["legend"])
     paths = _remove_title_block_fill_artifacts(paths, chrome_regions["titleBlock"])
-    _normalize_north_labels(texts, width, height)
+    _normalize_north_labels(texts, paths, width, height)
     _fit_cad_text_to_enclosing_boxes(texts, paths)
     _separate_connector_identifier_labels(texts, paths)
     _anchor_room_labels_to_enclosing_boxes(texts, paths)
@@ -2869,13 +2869,46 @@ def _normalize_imported_compass_orientation(paths, texts, width, height):
         label["x"], label["y"] = rotate_counterclockwise(label_x, label_y)
 
 
-def _normalize_north_labels(texts, width, height):
-    """Render the north-arrow N with the tall serif style used by the drawing."""
+def _normalize_north_labels(texts, paths, width, height):
+    """Render the north-arrow N with the tall serif style used by the drawing.
+
+    The N in an imported DWG is a separate CAD text entity, not part of the
+    needle geometry.  Preserve its original compass direction, but move it a
+    small distance outward from the needle so its glyph never overlaps the
+    tip after the browser normalizes the font metrics.
+    """
     for item in texts:
         value = re.sub(r"\s+", "", str(item.get("text") or item.get("name") or "")).upper()
         box = _item_box(item)
         if value != "N" or box["x"] > width * 0.18 or box["y"] > height * 0.25:
             continue
+        label_center_x = box["x"] + box["width"] / 2
+        label_center_y = box["y"] + box["height"] / 2
+        max_needle_size = min(width, height) * 0.13
+        nearby_paths = []
+        for path in paths:
+            path_box = _path_box(path)
+            if max(path_box["width"], path_box["height"]) > max_needle_size:
+                continue
+            path_center_x = path_box["x"] + path_box["width"] / 2
+            path_center_y = path_box["y"] + path_box["height"] / 2
+            if math.hypot(path_center_x - label_center_x, path_center_y - label_center_y) <= min(width, height) * 0.11:
+                nearby_paths.append(path_box)
+        if nearby_paths:
+            needle_left = min(path_box["x"] for path_box in nearby_paths)
+            needle_top = min(path_box["y"] for path_box in nearby_paths)
+            needle_right = max(path_box["x"] + path_box["width"] for path_box in nearby_paths)
+            needle_bottom = max(path_box["y"] + path_box["height"] for path_box in nearby_paths)
+            needle_center_x = (needle_left + needle_right) / 2
+            needle_center_y = (needle_top + needle_bottom) / 2
+            direction_x = label_center_x - needle_center_x
+            direction_y = label_center_y - needle_center_y
+            direction_length = math.hypot(direction_x, direction_y)
+            if direction_length > 0.01:
+                font_size = max(float(item.get("fontSize") or 0), min(width, height) * 0.028)
+                outward_gap = max(font_size * 0.48, min(width, height) * 0.015)
+                item["x"] = float(item.get("x") or 0) + direction_x / direction_length * outward_gap
+                item["y"] = float(item.get("y") or 0) + direction_y / direction_length * outward_gap
         font_size = max(float(item.get("fontSize") or 0), min(width, height) * 0.028)
         item["cadRender"] = True
         item["cadFont"] = "Times New Roman"
