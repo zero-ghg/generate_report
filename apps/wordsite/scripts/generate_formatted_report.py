@@ -104,35 +104,24 @@ def build_formatted_report_docx(data, template_path):
     update_statement_text(document, data)
     fixed_tail = trim_trailing_blank_tail_elements(extract_fixed_tail_from_heading(document, "资质证书"))
     remove_report_body_after_first_chapter(document)
-    ensure_blank_page_after_toc(document)
+    # Do not add an extra page break after the TOC. The official template
+    # already controls its own pagination; adding one here creates a wholly
+    # blank page between the directory and the summary table.
     toc_entries, next_page_no, body_section_index = append_report_body(document, data, template_tables, template_heading)
-    blank_section_index = None
     if fixed_tail:
         certificate_title = chapter_heading(len(toc_entries) + 1, "资质证书")
         update_fixed_tail_heading(fixed_tail, "资质证书", certificate_title)
         cert_start_page = next_page_no
-        if next_page_no % 2 == 0:
-            blank_section_index = add_body_blank_page_section(document)
-            next_page_no += 1
-            cert_start_page = next_page_no
-            add_body_continued_section(document)
-            clear_section_footer(document.sections[blank_section_index])
-        else:
-            document.add_page_break()
+        # The template used to insert a deliberately blank page so the
+        # certificate began on an odd page.  It produces a wholly empty page
+        # in the exported report, so always continue directly on the next
+        # page instead.
+        document.add_page_break()
         append_body_elements(document, fixed_tail)
         total_body_pages = cert_start_page + fixed_tail_page_count(fixed_tail) - 1
-        if blank_section_index is not None:
-            apply_body_section_footers_with_total(
-                document,
-                body_section_index,
-                total_body_pages,
-                skip_indices={blank_section_index},
-            )
-            clear_section_footer(document.sections[blank_section_index])
+        apply_body_section_footers_with_total(document, body_section_index, total_body_pages)
         toc_entries.append((certificate_title, cert_start_page))
     replace_toc_cache(document, toc_entries)
-    if blank_section_index is not None:
-        clear_section_footer(document.sections[blank_section_index])
     update_fields_on_open(document)
 
     buffer = BytesIO()
@@ -325,7 +314,8 @@ def cover_value(general, *keys):
         value = general.get(key)
         if value is not None and str(value).strip() != "":
             return value
-    return ""
+    # 封面字段在报告中使用破折号明确表示“无此项”，不要留白。
+    return EMPTY
 
 
 def replace_cover_report_number(paragraph, label, report_number, segments=None):
@@ -931,32 +921,32 @@ def fill_summary_table(table, data):
         trim_summary_optional_rows(table, len(equipment), len(project_items))
         return
 
-    set_summary_field_cell(table.cell(0, 3), general, "clientName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(1, 3), general, "projectName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(2, 3), general, "projectAddress", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(3, 3), general, "contactDepartment", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(3, 6), general, "contactName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(3, 14), general, "contactPhone", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(4, 3), general, "inspectedDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(5, 3), general, "nextDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(5, 11), general, "detectionType", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(6, 3), general, "detectionBasis", align=WD_ALIGN_PARAGRAPH.LEFT, empty_text="")
+    set_summary_field_cell(table.cell(0, 3), general, "clientName", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(1, 3), general, "projectName", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(2, 3), general, "projectAddress", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(3, 3), general, "contactDepartment", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(3, 6), general, "contactName", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(3, 14), general, "contactPhone", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(4, 3), general, "inspectedDate", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(5, 3), general, "nextDate", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(5, 11), general, "detectionType", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(6, 3), general, "detectionBasis", align=WD_ALIGN_PARAGRAPH.LEFT)
 
     for row_index in range(8, 14):
         item = equipment[row_index - 8] if row_index - 8 < len(equipment) else {}
-        set_summary_field_cell(table.cell(row_index, 1), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 4), item, "model", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 7), item, "serial", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 10), item, "range", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 14), item, "calibrationDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 1), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 4), item, "model", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 7), item, "serial", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 10), item, "range", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 14), item, "calibrationDate", align=WD_ALIGN_PARAGRAPH.CENTER)
 
     for row_index in range(16, 27):
         item = project_items[row_index - 16] if row_index - 16 < len(project_items) else {}
-        set_summary_field_cell(table.cell(row_index, 0), item, "id", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 2), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 5), item, "lightningCategory", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 9), item, "lightningProtectionLevel", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 13), item, "pages", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 0), item, "id", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 2), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 5), item, "lightningCategory", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 9), item, "lightningProtectionLevel", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 13), item, "pages", align=WD_ALIGN_PARAGRAPH.CENTER)
 
     fill_summary_conclusion_cell(table.cell(27, 2), general.get("conclusion"))
     set_summary_field_cell(table.cell(28, 2), general, "tester", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
@@ -966,32 +956,32 @@ def fill_summary_table(table, data):
 
 
 def fill_summary_table_compact(table, general, project_items, equipment):
-    set_summary_field_cell(table.cell(0, 3), general, "clientName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(1, 3), general, "projectName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(2, 3), general, "projectAddress", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(3, 3), general, "contactDepartment", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(3, 8), general, "contactName", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(3, 15), general, "contactPhone", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(4, 3), general, "inspectedDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(5, 3), general, "nextDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(5, 12), general, "detectionType", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(6, 3), general, "detectionBasis", align=WD_ALIGN_PARAGRAPH.LEFT, empty_text="")
+    set_summary_field_cell(table.cell(0, 3), general, "clientName", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(1, 3), general, "projectName", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(2, 3), general, "projectAddress", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(3, 3), general, "contactDepartment", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(3, 8), general, "contactName", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(3, 15), general, "contactPhone", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(4, 3), general, "inspectedDate", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(5, 3), general, "nextDate", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(5, 12), general, "detectionType", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_summary_field_cell(table.cell(6, 3), general, "detectionBasis", align=WD_ALIGN_PARAGRAPH.LEFT)
 
     for row_index in range(8, min(14, len(table.rows))):
         item = equipment[row_index - 8] if row_index - 8 < len(equipment) else {}
-        set_summary_field_cell(table.cell(row_index, 1), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 4), item, "model", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 5), item, "serial", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 11), item, "range", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 15), item, "calibrationDate", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 1), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 4), item, "model", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 5), item, "serial", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 11), item, "range", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 15), item, "calibrationDate", align=WD_ALIGN_PARAGRAPH.CENTER)
 
     for row_index in range(16, min(19, len(table.rows))):
         item = project_items[row_index - 16] if row_index - 16 < len(project_items) else {}
-        set_summary_field_cell(table.cell(row_index, 0), item, "id", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 2), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 6), item, "lightningCategory", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 10), item, "lightningProtectionLevel", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(row_index, 14), item, "pages", align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+        set_summary_field_cell(table.cell(row_index, 0), item, "id", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 2), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 6), item, "lightningCategory", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 10), item, "lightningProtectionLevel", align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_summary_field_cell(table.cell(row_index, 14), item, "pages", align=WD_ALIGN_PARAGRAPH.CENTER)
 
     if len(table.rows) > 19:
         fill_summary_conclusion_cell(table.cell(19, 2), general.get("conclusion"))
@@ -1040,6 +1030,9 @@ def set_summary_field_cell(cell, source, field, transform=None, align=WD_ALIGN_P
 def fill_summary_conclusion_cell(cell, conclusion):
     paragraphs = ensure_cell_paragraph_count(cell, 11)
     intro, items = summary_conclusion_parts(conclusion)
+    if not has_value(conclusion):
+        intro = EMPTY
+        items = []
 
     paragraph_specs = [
         ("", WD_ALIGN_PARAGRAPH.LEFT),
@@ -1422,6 +1415,9 @@ def display_row_standard(row_data):
 
 
 def row_field_color(row_data, field):
+    value = row_data.get(field)
+    if not has_value(value) or normalize_dash_text(str(value)) == EMPTY:
+        return None
     color = (row_data.get("fieldColors") or {}).get(field)
     if isinstance(color, str) and color.lower() in {"#ff0000", "ff0000", "red"}:
         return RGBColor(255, 0, 0)
@@ -1429,6 +1425,11 @@ def row_field_color(row_data, field):
 
 
 def row_field_segments(row_data, field):
+    # A stale rich-text record must never colour a synthesized empty-value
+    # placeholder.  When the actual field is empty, render the neutral dash.
+    value = row_data.get(field)
+    if not has_value(value) or normalize_dash_text(str(value)) == EMPTY:
+        return None
     segments = (row_data.get("formattedFields") or {}).get(field)
     if not isinstance(segments, list):
         return None
@@ -1985,7 +1986,11 @@ def measurement_positions(kind):
 def fill_measurement_row(table, row_index, row_data, kind):
     if kind == "grounding":
         set_cell(table.cell(row_index, 0), row_data.get("marker"), align=WD_ALIGN_PARAGRAPH.CENTER)
-        set_cell(table.cell(row_index, 1), join_nonempty(row_data.get("workLocation"), row_data.get("equipmentName")))
+        set_cell(
+            table.cell(row_index, 1),
+            join_nonempty(row_data.get("workLocation"), row_data.get("equipmentName")),
+            align=WD_ALIGN_PARAGRAPH.CENTER,
+        )
         set_cell(table.cell(row_index, 3), row_data.get("conductorSpec"), align=WD_ALIGN_PARAGRAPH.CENTER, size=6.5)
         set_cell(table.cell(row_index, 4), row_data.get("protectionZone"), align=WD_ALIGN_PARAGRAPH.CENTER)
         set_cell(table.cell(row_index, 5), row_data.get("standardValue"), align=WD_ALIGN_PARAGRAPH.CENTER)
@@ -1996,6 +2001,7 @@ def fill_measurement_row(table, row_index, row_data, kind):
         set_cell(
             table.cell(row_index, 1),
             join_nonempty(row_data.get("workLocation"), row_data.get("equipmentName"), row_data.get("referencePoint")),
+            align=WD_ALIGN_PARAGRAPH.CENTER,
         )
         set_cell(table.cell(row_index, 3), row_data.get("conductorSpec"), align=WD_ALIGN_PARAGRAPH.CENTER, size=6.5)
         set_cell(table.cell(row_index, 4), row_data.get("protectionZone"), align=WD_ALIGN_PARAGRAPH.CENTER)
@@ -2099,7 +2105,18 @@ def unique_row_cells(row):
 
 
 def join_nonempty(*items):
-    return "，".join(str(item) for item in items if item is not None and str(item) != "")
+    placeholder_labels = {"所在位置", "设备名称", "基准点"}
+    values = [
+        str(item).strip()
+        for item in items
+        if (
+            item is not None
+            and str(item).strip()
+            and normalize_dash_text(str(item)) != EMPTY
+            and str(item).strip() not in placeholder_labels
+        )
+    ]
+    return "，".join(values) if values else EMPTY
 
 
 def legend_content_page_count(legend):
@@ -2738,6 +2755,11 @@ def set_cell(
         set_run_font(run, size=size, bold=bold)
         if color is not None:
             run.font.color.rgb = color
+        else:
+            # A cell copied from the DOCX template can carry a direct color
+            # from a previous run.  Do not let that residual style turn a
+            # synthesized placeholder (such as “—”) red.
+            run.font.color.rgb = RGBColor(0, 0, 0)
 
 
 def set_cell_segments(
@@ -2777,6 +2799,8 @@ def set_cell_segments(
             color = segment.get("color")
             if isinstance(color, str) and color.lower() in {"#ff0000", "ff0000", "red"}:
                 run.font.color.rgb = RGBColor(255, 0, 0)
+            else:
+                run.font.color.rgb = RGBColor(0, 0, 0)
 
 
 def first_cell_run_properties(cell):

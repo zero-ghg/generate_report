@@ -13,7 +13,7 @@ from apps.wordsite.scripts.generate_formatted_report import (
     repeat_measurement_header_rows,
     trim_measurement_rows_to_fit,
 )
-from apps.wordsite.scripts.parse_formatted_report import parse_subproject_table, parse_summary_table, parse_transition_row
+from apps.wordsite.scripts.parse_formatted_report import parse_grounding_row, parse_subproject_table, parse_summary_table, parse_transition_row
 from apps.wordsite.scripts.parse_dwg_workspace import (
     _assign_interaction_groups,
     _cad_glyph_outlines_complete,
@@ -477,6 +477,18 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         self.assertEqual(row["marker"], "D55")
         self.assertEqual(row["measuredValue"], "0.02")
         self.assertEqual(row["result"], "符合")
+
+    def test_grounding_single_location_cell_value_is_equipment_name(self):
+        document = Document()
+        table = document.add_table(rows=2, cols=8)
+        values = ["1", "1#加油机", "", "—", "LPZ0B", "≤4.0", "1.2", "符合"]
+        for column, value in enumerate(values):
+            table.cell(1, column).text = value
+
+        row = parse_grounding_row(table, 1)
+
+        self.assertEqual(row["workLocation"], "")
+        self.assertEqual(row["equipmentName"], "1#加油机")
 
     def test_transition_row_resolves_columns_when_standard_header_is_merged(self):
         document = Document()

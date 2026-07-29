@@ -933,6 +933,10 @@ def parse_detection_type(text):
 
 def split_location_text(text):
     parts = split_joined_text(text)
+    # 接地电阻表将“所在位置及设备名称”合并为一个单元格。只有一个值时，
+    # 它在既有报告中表示设备名称（例如“1#加油机”），而不是所在位置。
+    if len(parts) == 1:
+        return "", parts[0]
     return parts[0] if len(parts) > 0 else "", parts[1] if len(parts) > 1 else ""
 
 

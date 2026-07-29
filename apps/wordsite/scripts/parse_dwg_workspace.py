@@ -2008,7 +2008,7 @@ def _item_target(item, kind):
 
 _REPORT_FIELD_LABELS = {
     "equipmentName": "设备名称",
-    "workLocation": "所在位置",
+    "workLocation": "—",
     "installLocation": "安装位置",
     "referencePoint": "基准点",
     "conductorSpec": "连接导体材质规格",
