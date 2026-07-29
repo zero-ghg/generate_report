@@ -21,6 +21,7 @@ from apps.wordsite.scripts.parse_dwg_workspace import (
     _fit_cad_text_to_enclosing_boxes,
     _is_orphan_legend_swatch,
     _match_marker_text,
+    _marker_target_from_text,
     _marker_text_visual_box,
     _merge_legend_hatch_parts,
     _report_fields,
@@ -39,6 +40,31 @@ from apps.wordsite.scripts.parse_dwg_workspace import (
 
 # DWG/DXF 工作区解析测试：验证图纸文字与检测表记录共享 id，并保留未匹配记录。
 class DwgWorkspaceParserTests(SimpleTestCase):
+    def test_nearby_stacked_triangle_marker_is_matched_beyond_legacy_radius(self):
+        """A label may sit just over 30 CAD units from its two-part arrow."""
+        text = {"id": 10, "text": "D11", "x": 0, "y": 0, "importedSourceHandles": ["TEXT"]}
+        paths = [
+            {
+                "id": 1,
+                "name": "HATCH",
+                "closed": True,
+                "importedSourceHandles": ["ARROW"],
+                "points": [{"x": 34, "y": 0}, {"x": 42, "y": 4}, {"x": 34, "y": 8}],
+            },
+            {
+                "id": 2,
+                "name": "HATCH",
+                "closed": True,
+                "importedSourceHandles": ["ARROW"],
+                "points": [{"x": 34, "y": 8}, {"x": 42, "y": 12}, {"x": 34, "y": 16}],
+            },
+        ]
+
+        target = _marker_target_from_text(text, paths)
+
+        self.assertEqual(target["sourceElementIds"], [1, 2, 10])
+        self.assertEqual(target["side"], "right")
+
     def test_exports_each_child_drawing_as_a_separate_legend_canvas(self):
         legend = {
             "boardHeight": 600,

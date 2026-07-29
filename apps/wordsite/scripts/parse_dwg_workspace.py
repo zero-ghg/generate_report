@@ -1006,6 +1006,12 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
     test_points = []
     unmatched = []
     bound_rows = 0
+    # A solid CAD marker must belong to one numbered callout only.  Without
+    # this guard, a slightly farther label can claim the same HATCH triangle
+    # after its nearer neighbour has already been matched.  The later point
+    # then falls back to a synthetic front-end arrow, so the drawing displays
+    # an extra arrow beside the original CAD one.
+    used_marker_path_ids = set()
 
     _infer_missing_report_markers(report_tables, text_candidates)
 
@@ -1034,12 +1040,28 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
             if target is None:
                 target = _target_from_existing(existing, handle_targets)
             if target is None and marker:
+                available_paths = [
+                    path
+                    for path in parsed["paths"]
+                    if int(path.get("id") or 0) not in used_marker_path_ids
+                ]
                 target = _match_marker_text(
                     marker,
                     row,
                     text_candidates,
-                    parsed["paths"],
+                    available_paths,
                     report_type=report_type,
+                )
+
+            # Range annotations intentionally serve several report rows and
+            # are collapsed below.  Ordinary labels, however, consume their
+            # actual triangular HATCH parts so an adjacent label cannot reuse
+            # them.
+            if target is not None and not _parse_marker_range(target.get("markerLabel")):
+                used_marker_path_ids.update(
+                    int(item_id)
+                    for item_id in target.get("sourceElementIds") or []
+                    if int(item_id) in {int(path.get("id") or 0) for path in parsed["paths"]}
                 )
 
             row_id = _unique_row_id(row.get("id"), used_ids, next_id)
@@ -1790,9 +1812,11 @@ def _marker_target_from_text(text, paths):
     text_y = float(text.get("y") or 0)
     # Range labels (D100-D101) are often printed to the left of a vertical
     # equipment bank, so their original CAD arrow is farther away than a
-    # regular single-point label.  Keep the tight radius for normal markers;
-    # only give explicit ranges enough reach to claim their existing triangle.
-    marker_distance_limit = 72 if _parse_marker_range(text.get("text")) else 30
+    # regular single-point label.  A single label can also sit just outside a
+    # 30-unit radius when two vertically stacked arrow HATCH parts are used.
+    # Keep the broad range allowance, while giving ordinary labels enough
+    # reach to claim their own adjacent marker.
+    marker_distance_limit = 72 if _parse_marker_range(text.get("text")) else 44
     candidates = []
     for path in paths:
         marker_name = str(path.get("name") or "").upper()
@@ -1828,7 +1852,17 @@ def _marker_target_from_text(text, paths):
         target["markerLabel"] = _compact_marker_text(text.get("text"))
         return target
 
-    _, _, _, marker, marker_box = min(candidates, key=lambda item: item[0])
+    # Distance alone can choose a marker from the next row when stacked call
+    # outs are very close.  Prefer the candidate aligned with the label on
+    # either axis (the usual marker/label relationship) before using distance
+    # as the final tie-breaker.
+    _, _, _, marker, marker_box = min(
+        candidates,
+        key=lambda item: (
+            item[0] + min(abs(item[1] - text_x), abs(item[2] - text_y)) * 0.75,
+            item[0],
+        ),
+    )
     marker_parts = [marker]
     combined_box = dict(marker_box)
     for _, _, _, candidate, candidate_box in candidates:
