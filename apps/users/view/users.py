@@ -102,3 +102,31 @@ class UserListView(APIView):
         user.is_delete = True
         user.save(update_fields=["is_delete", "update_time"])
         return Response({"code": 200, "msg": "用户已删除"})
+
+
+class AdminPasswordResetView(APIView):
+    """Administrative password reset endpoint.
+
+    It deliberately requires an administrator access token.  This keeps the
+    simple username + new-password payload useful to operational tools without
+    exposing a public endpoint that could reset any account.
+    """
+
+    authentication_classes = [TokenAuthenticate]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.is_admin:
+            raise PermissionDenied("仅管理员可重置用户密码")
+        username = str(request.data.get("username") or "").strip()
+        password = str(request.data.get("password") or "")
+        if not username:
+            raise ValidationError("请输入用户名")
+        if len(password) < 6:
+            raise ValidationError("新密码至少需要 6 位")
+        user = UserInfo.objects.filter(username=username, is_delete=False).first()
+        if not user:
+            raise ValidationError("用户不存在")
+        user.password = make_password(password)
+        user.save(update_fields=["password", "update_time"])
+        return Response({"code": 200, "data": user_payload(user), "msg": "密码已重置"})

@@ -23,7 +23,12 @@ def custom_exception_handler(exc, context):
         }
         # 序列化器的异常
         # 检查是否有非字段错误
-        if 'non_field_errors' in response.data:
+        # ``ValidationError('message')`` is represented by DRF as a list,
+        # while serializer errors use a field dictionary.  Normalize both
+        # shapes so an expected validation error never crashes the endpoint.
+        if isinstance(response.data, (list, tuple)):
+            custom_response_data['message'] = ''.join(str(item) for item in response.data)
+        elif 'non_field_errors' in response.data:
             error_message = '发生错误'
             error_code = response.status_code
             non_field_errors = response.data.get('non_field_errors', [])
