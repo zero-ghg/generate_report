@@ -5,6 +5,7 @@ from rest_framework_simplejwt.views import token_refresh
 
 urlpatterns = [
     path('api/v1/', include('users.urls')),
+    path('api/v1/projects/', include('projects.urls')),
     path('api/v1/wordsite/', include('wordsite.urls')),
     path('api/v1/refresh/', token_refresh),
 ]

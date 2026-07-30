@@ -8,6 +8,12 @@ from generate_report.settings.status_code import StatusCode
 def custom_exception_handler(exc, context):
     response = exception_handler(exc, context)
 
+    # DRF returns None for exceptions it does not own.  Preserve that
+    # behaviour instead of masking the original exception with a second
+    # AttributeError while formatting the error response.
+    if response is None:
+        return None
+
     if response.data is not None:
         # 初始的错误信息
         custom_response_data = {

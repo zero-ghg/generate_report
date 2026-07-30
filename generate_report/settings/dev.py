@@ -47,7 +47,8 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework_simplejwt',
     'apps.users.apps.UserConfig',
-    'apps.wordsite.apps.WordsiteConfig'
+    'apps.wordsite.apps.WordsiteConfig',
+    'apps.projects.apps.ProjectsConfig',
 
 ]
 
@@ -88,11 +89,11 @@ WSGI_APPLICATION = 'generate_report.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'generate_report',
-        'USER': 'root',
-        'PASSWORD': '123456',
-        'HOST': 'localhost',
-        'PORT': '3306',
+        'NAME': os.environ.get('MYSQL_DATABASE', 'generate_report'),
+        'USER': os.environ.get('MYSQL_USER', 'root'),
+        'PASSWORD': os.environ.get('MYSQL_PASSWORD', '123456'),
+        'HOST': os.environ.get('MYSQL_HOST', '127.0.0.1'),
+        'PORT': os.environ.get('MYSQL_PORT', '3306'),
     }
 }
 
@@ -151,7 +152,7 @@ REST_FRAMEWORK = {
     # ],
     # TODO: 修改包名
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'generate_report.utils.token.RemoteTokenAuthentication',
+        'generate_report.utils.auth.TokenAuthenticate',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -161,7 +162,7 @@ REST_FRAMEWORK = {
     'EXCEPTION_HANDLER': 'generate_report.utils.custom_exception.custom_exception_handler',
 }
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=12),  # Access Token的有效期
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),  # Refresh Token的有效期
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=7),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=14),
 
 }
