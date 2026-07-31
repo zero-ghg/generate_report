@@ -1,17 +1,22 @@
 from io import StringIO
+from pathlib import Path
 
 import ezdxf
 from django.test import SimpleTestCase
 from docx import Document
+from docx.oxml.ns import qn
 from docx.shared import RGBColor
 
 from apps.wordsite.scripts.generate_formatted_report import (
+    ensure_blank_page_after_toc,
     expand_compact_subproject_category_column,
     extract_legend_canvases,
+    fill_summary_table,
     merge_subproject_category_columns,
     measurement_group_capacity,
     repeat_measurement_header_rows,
     trim_measurement_rows_to_fit,
+    update_statement_text,
 )
 from apps.wordsite.scripts.parse_formatted_report import parse_grounding_row, parse_subproject_table, parse_summary_table, parse_transition_row
 from apps.wordsite.scripts.parse_dwg_workspace import (
@@ -419,6 +424,94 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         self.assertEqual(general["projectItems"][0]["pages"], "2、3、10、11")
         self.assertEqual(general["equipment"][0]["model"], "S-3019B")
         self.assertEqual(general["equipment"][0]["serial"], "052211679")
+
+    def test_summary_table_expands_for_all_equipment_and_project_items(self):
+        template_path = Path(__file__).parent / "templates" / "template-official.docx"
+        document = Document(template_path)
+        table = document.tables[0]
+        data = {
+            "assistant": {
+                "general": {
+                    "equipment": [
+                        {
+                            "name": f"设备{index}",
+                            "model": f"M{index}",
+                            "serial": f"S{index}",
+                            "range": f"R{index}",
+                            "calibrationDate": f"2026-0{index}-01",
+                        }
+                        for index in range(1, 8)
+                    ],
+                    "projectItems": [
+                        {
+                            "id": str(index),
+                            "name": f"检测项目{index}",
+                            "lightningCategory": "第二类",
+                            "lightningProtectionLevel": "—",
+                            "pages": str(index),
+                        }
+                        for index in range(1, 6)
+                    ],
+                }
+            }
+        }
+
+        fill_summary_table(table, data)
+        parsed = parse_summary_table(table)
+
+        self.assertEqual([item["name"] for item in parsed["equipment"]], [f"设备{index}" for index in range(1, 8)])
+        self.assertEqual([item["name"] for item in parsed["projectItems"]], [f"检测项目{index}" for index in range(1, 6)])
+
+    def test_statement_update_keeps_chinese_numbering_and_removes_decimal_subnumbers(self):
+        template_path = Path(__file__).parent / "templates" / "template-official.docx"
+        document = Document(template_path)
+        statement_paragraphs = document.paragraphs[23:35]
+        numbering_before = [
+            paragraph._p.pPr.numPr.numId.val if paragraph._p.pPr is not None and paragraph._p.pPr.numPr is not None else None
+            for paragraph in statement_paragraphs
+        ]
+        content = "\n".join(
+            [
+                "一、有下列情形之一的，本次检测报告无效：",
+                "（一）报告未盖章。",
+                "（二）报告未签字。",
+                "（三）报告被涂改。",
+                "（四）复印件未经确认。",
+                "二、委托单位对资料真实性负责。",
+                "三、报告仅证明受检项目情况。",
+                "四、检测周期按规定执行。",
+                "五、本报告一式三份。",
+                "六、异议应在期限内提出。",
+                "七、符号说明。",
+                "八、检测机构信息。",
+            ]
+        )
+
+        update_statement_text(document, {"cover": {"statementContent": content}})
+
+        numbering_after = [
+            paragraph._p.pPr.numPr.numId.val if paragraph._p.pPr is not None and paragraph._p.pPr.numPr is not None else None
+            for paragraph in statement_paragraphs
+        ]
+        self.assertEqual(numbering_after[0], numbering_before[0])
+        self.assertEqual(numbering_after[1:5], [None, None, None, None])
+        self.assertEqual(numbering_after[5:], numbering_before[5:])
+        self.assertEqual(statement_paragraphs[0].text, "有下列情形之一的，本次检测报告无效：")
+        self.assertEqual(statement_paragraphs[1].text, "报告未盖章。")
+
+    def test_inserts_page_break_immediately_after_toc(self):
+        template_path = Path(__file__).parent / "templates" / "template-official.docx"
+        document = Document(template_path)
+
+        ensure_blank_page_after_toc(document)
+
+        body_children = list(document._element.body)
+        toc_index = next(index for index, child in enumerate(body_children) if child.tag == qn("w:sdt"))
+        next_child = body_children[toc_index + 1]
+        self.assertEqual(next_child.tag, qn("w:p"))
+        self.assertTrue(
+            any(br.get(qn("w:type")) == "page" for br in next_child.xpath(".//w:br"))
+        )
 
     def test_parses_fourteen_column_summary_without_shifting_empty_signatures(self):
         document = Document()

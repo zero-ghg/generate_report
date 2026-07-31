@@ -104,9 +104,10 @@ def build_formatted_report_docx(data, template_path):
     update_statement_text(document, data)
     fixed_tail = trim_trailing_blank_tail_elements(extract_fixed_tail_from_heading(document, "资质证书"))
     remove_report_body_after_first_chapter(document)
-    # Do not add an extra page break after the TOC. The official template
-    # already controls its own pagination; adding one here creates a wholly
-    # blank page between the directory and the summary table.
+    # Keep the intentionally blank separator page between the directory and
+    # the report body.  Removing it makes the summary table start immediately
+    # after the TOC and changes the official report's front-matter layout.
+    ensure_blank_page_after_toc(document)
     toc_entries, next_page_no, body_section_index = append_report_body(document, data, template_tables, template_heading)
     if fixed_tail:
         certificate_title = chapter_heading(len(toc_entries) + 1, "资质证书")
@@ -243,7 +244,8 @@ def update_statement_text(document, data):
     slots = [paragraph for paragraph in paragraphs[start_index:end_index] if paragraph.text.strip()]
     for index, paragraph in enumerate(slots):
         text = lines[index] if index < len(lines) else ""
-        remove_paragraph_numbering(paragraph)
+        if paragraph_numbering_format(paragraph) in {"decimal", "decimalZero"}:
+            remove_paragraph_numbering(paragraph)
         line_segments = formatted_lines[index] if index < len(formatted_lines) and isinstance(formatted_lines[index], list) else None
         set_statement_paragraph_text_keep_format(paragraph, text, index, line_segments)
 
@@ -273,6 +275,54 @@ def statement_paragraph_indent(text, index):
     return None, None
 
 
+def paragraph_numbering_format(paragraph):
+    p_pr = paragraph._p.pPr
+    if p_pr is None or p_pr.numPr is None or p_pr.numPr.numId is None:
+        return None
+
+    num_id = int(p_pr.numPr.numId.val)
+    level = int(p_pr.numPr.ilvl.val) if p_pr.numPr.ilvl is not None else 0
+    numbering_root = paragraph.part.numbering_part.element
+    num_element = next(
+        (
+            item
+            for item in numbering_root.findall(qn("w:num"))
+            if int(item.get(qn("w:numId"))) == num_id
+        ),
+        None,
+    )
+    if num_element is None:
+        return None
+
+    abstract_id_element = num_element.find(qn("w:abstractNumId"))
+    if abstract_id_element is None:
+        return None
+    abstract_id = int(abstract_id_element.get(qn("w:val")))
+    abstract_element = next(
+        (
+            item
+            for item in numbering_root.findall(qn("w:abstractNum"))
+            if int(item.get(qn("w:abstractNumId"))) == abstract_id
+        ),
+        None,
+    )
+    if abstract_element is None:
+        return None
+
+    level_element = next(
+        (
+            item
+            for item in abstract_element.findall(qn("w:lvl"))
+            if int(item.get(qn("w:ilvl"))) == level
+        ),
+        None,
+    )
+    if level_element is None:
+        return None
+    format_element = level_element.find(qn("w:numFmt"))
+    return format_element.get(qn("w:val")) if format_element is not None else None
+
+
 def remove_paragraph_numbering(paragraph):
     p_pr = paragraph._p.get_or_add_pPr()
     num_pr = p_pr.find(qn("w:numPr"))
@@ -288,7 +338,8 @@ def statement_content_lines(content):
             continue
         if re.sub(r"\s+", "", line) == "声明":
             continue
-        line = re.sub(r"^\d+\s*(?=[一二三四五六七八九十]+、)", "", line)
+        line = re.sub(r"^[一二三四五六七八九十百]+[、.．]\s*", "", line)
+        line = re.sub(r"^[（(]?[一二三四五六七八九十百\d]+[）)、.．]\s*", "", line)
         lines.append(line)
     return lines
 
@@ -914,9 +965,12 @@ def fill_summary_table(table, data):
     equipment = meaningful_summary_items(
         general.get("equipment", []),
         ("name", "model", "serial", "range", "calibrationDate"),
-    )[:6]
+    )
 
-    if len(table.rows) <= 21 and len(table.columns) >= 17:
+    compact = len(table.rows) <= 21 and len(table.columns) >= 17
+    ensure_summary_list_capacity(table, len(equipment), len(project_items))
+
+    if compact:
         fill_summary_table_compact(table, general, project_items, equipment)
         trim_summary_optional_rows(table, len(equipment), len(project_items))
         return
@@ -932,26 +986,27 @@ def fill_summary_table(table, data):
     set_summary_field_cell(table.cell(5, 11), general, "detectionType", align=WD_ALIGN_PARAGRAPH.CENTER)
     set_summary_field_cell(table.cell(6, 3), general, "detectionBasis", align=WD_ALIGN_PARAGRAPH.LEFT)
 
-    for row_index in range(8, 14):
-        item = equipment[row_index - 8] if row_index - 8 < len(equipment) else {}
+    layout = summary_table_layout(table)
+    for row_index in range(layout["equipment_start"], layout["project_title"]):
+        item = equipment[row_index - layout["equipment_start"]] if row_index - layout["equipment_start"] < len(equipment) else {}
         set_summary_field_cell(table.cell(row_index, 1), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 4), item, "model", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 7), item, "serial", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 10), item, "range", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 14), item, "calibrationDate", align=WD_ALIGN_PARAGRAPH.CENTER)
 
-    for row_index in range(16, 27):
-        item = project_items[row_index - 16] if row_index - 16 < len(project_items) else {}
+    for row_index in range(layout["project_start"], layout["conclusion"]):
+        item = project_items[row_index - layout["project_start"]] if row_index - layout["project_start"] < len(project_items) else {}
         set_summary_field_cell(table.cell(row_index, 0), item, "id", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 2), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 5), item, "lightningCategory", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 9), item, "lightningProtectionLevel", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 13), item, "pages", align=WD_ALIGN_PARAGRAPH.CENTER)
 
-    fill_summary_conclusion_cell(table.cell(27, 2), general.get("conclusion"))
-    set_summary_field_cell(table.cell(28, 2), general, "tester", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(28, 8), general, "reviewer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-    set_summary_field_cell(table.cell(28, 15), general, "signer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    fill_summary_conclusion_cell(table.cell(layout["conclusion"], 2), general.get("conclusion"))
+    set_summary_field_cell(table.cell(layout["signature"], 2), general, "tester", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(layout["signature"], 8), general, "reviewer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(layout["signature"], 15), general, "signer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
     trim_summary_optional_rows(table, len(equipment), len(project_items))
 
 
@@ -967,28 +1022,89 @@ def fill_summary_table_compact(table, general, project_items, equipment):
     set_summary_field_cell(table.cell(5, 12), general, "detectionType", align=WD_ALIGN_PARAGRAPH.CENTER)
     set_summary_field_cell(table.cell(6, 3), general, "detectionBasis", align=WD_ALIGN_PARAGRAPH.LEFT)
 
-    for row_index in range(8, min(14, len(table.rows))):
-        item = equipment[row_index - 8] if row_index - 8 < len(equipment) else {}
+    layout = summary_table_layout(table)
+    for row_index in range(layout["equipment_start"], layout["project_title"]):
+        item = equipment[row_index - layout["equipment_start"]] if row_index - layout["equipment_start"] < len(equipment) else {}
         set_summary_field_cell(table.cell(row_index, 1), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 4), item, "model", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 5), item, "serial", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 11), item, "range", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 15), item, "calibrationDate", align=WD_ALIGN_PARAGRAPH.CENTER)
 
-    for row_index in range(16, min(19, len(table.rows))):
-        item = project_items[row_index - 16] if row_index - 16 < len(project_items) else {}
+    for row_index in range(layout["project_start"], layout["conclusion"]):
+        item = project_items[row_index - layout["project_start"]] if row_index - layout["project_start"] < len(project_items) else {}
         set_summary_field_cell(table.cell(row_index, 0), item, "id", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 2), item, "name", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 6), item, "lightningCategory", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 10), item, "lightningProtectionLevel", align=WD_ALIGN_PARAGRAPH.CENTER)
         set_summary_field_cell(table.cell(row_index, 14), item, "pages", align=WD_ALIGN_PARAGRAPH.CENTER)
 
-    if len(table.rows) > 19:
-        fill_summary_conclusion_cell(table.cell(19, 2), general.get("conclusion"))
-    if len(table.rows) > 20:
-        set_summary_field_cell(table.cell(20, 2), general, "tester", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(20, 9), general, "reviewer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
-        set_summary_field_cell(table.cell(20, 16), general, "signer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    fill_summary_conclusion_cell(table.cell(layout["conclusion"], 2), general.get("conclusion"))
+    set_summary_field_cell(table.cell(layout["signature"], 2), general, "tester", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(layout["signature"], 9), general, "reviewer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+    set_summary_field_cell(table.cell(layout["signature"], 16), general, "signer", transform=signature_value, align=WD_ALIGN_PARAGRAPH.CENTER, empty_text="")
+
+
+def summary_table_layout(table):
+    equipment_header = find_table_row(table, ("仪器名称",))
+    project_title = find_table_row(table, ("检测项目列表", "检测子项目列表"))
+    conclusion = find_table_row(table, ("检测结论",))
+    signature = find_table_row(table, ("检测人",))
+    if None in {equipment_header, project_title, conclusion, signature}:
+        raise ValueError("总表模板缺少设备、检测项目、检测结论或签字行")
+
+    project_header = find_table_row(table, ("序号",), start=project_title + 1, stop=conclusion)
+    if project_header is None:
+        project_header = project_title + 1
+    return {
+        "equipment_header": equipment_header,
+        "equipment_start": equipment_header + 1,
+        "project_title": project_title,
+        "project_header": project_header,
+        "project_start": project_header + 1,
+        "conclusion": conclusion,
+        "signature": signature,
+    }
+
+
+def find_table_row(table, labels, start=0, stop=None):
+    stop = len(table.rows) if stop is None else min(stop, len(table.rows))
+    compact_labels = tuple(re.sub(r"\s+", "", label) for label in labels)
+    for row_index in range(start, stop):
+        text = re.sub(r"\s+", "", "".join(cell.text for cell in table.rows[row_index].cells))
+        if any(label in text for label in compact_labels):
+            return row_index
+    return None
+
+
+def ensure_summary_list_capacity(table, equipment_count, project_count):
+    layout = summary_table_layout(table)
+    ensure_table_row_capacity(
+        table,
+        layout["equipment_start"],
+        layout["project_title"],
+        equipment_count,
+    )
+    layout = summary_table_layout(table)
+    ensure_table_row_capacity(
+        table,
+        layout["project_start"],
+        layout["conclusion"],
+        project_count,
+    )
+
+
+def ensure_table_row_capacity(table, start, end, required_count):
+    existing_count = max(0, end - start)
+    if required_count <= existing_count:
+        return
+    if existing_count <= 0:
+        raise ValueError("总表模板没有可复制的数据行")
+
+    for _ in range(required_count - existing_count):
+        source_row = table.rows[end - 1]._tr
+        table.rows[end]._tr.addprevious(deepcopy(source_row))
+        end += 1
 
 
 def meaningful_summary_items(items, content_keys):
@@ -1150,47 +1266,22 @@ def pad_conclusion_items(items):
 
 
 def trim_summary_optional_rows(table, equipment_count, project_count):
-    if len(table.rows) <= 21:
-        trim_compact_summary_optional_rows(table, equipment_count, project_count)
-        return
-
+    layout = summary_table_layout(table)
     if project_count:
-        for row_index in range(26, 16 + project_count - 1, -1):
+        first_unused_row = layout["project_start"] + project_count
+        for row_index in range(layout["conclusion"] - 1, first_unused_row - 1, -1):
             table._tbl.remove(table.rows[row_index]._tr)
     else:
-        for row_index in range(26, 13, -1):
+        for row_index in range(layout["conclusion"] - 1, layout["project_title"] - 1, -1):
             table._tbl.remove(table.rows[row_index]._tr)
 
     if equipment_count:
-        for row_index in range(13, 8 + equipment_count - 1, -1):
+        first_unused_row = layout["equipment_start"] + equipment_count
+        for row_index in range(layout["project_title"] - 1, first_unused_row - 1, -1):
             table._tbl.remove(table.rows[row_index]._tr)
     else:
-        for row_index in range(13, 6, -1):
+        for row_index in range(layout["project_title"] - 1, layout["equipment_header"] - 1, -1):
             table._tbl.remove(table.rows[row_index]._tr)
-
-
-def trim_compact_summary_optional_rows(table, equipment_count, project_count):
-    if project_count:
-        last_project_row = min(18, 16 + project_count - 1)
-        for row_index in range(18, last_project_row, -1):
-            if row_index < len(table.rows):
-                table._tbl.remove(table.rows[row_index]._tr)
-    else:
-        for row_index in range(18, 13, -1):
-            if row_index < len(table.rows):
-                table._tbl.remove(table.rows[row_index]._tr)
-
-    if equipment_count:
-        last_equipment_row = min(13, 8 + equipment_count - 1)
-        for row_index in range(13, last_equipment_row, -1):
-            if row_index < len(table.rows):
-                table._tbl.remove(table.rows[row_index]._tr)
-    else:
-        for row_index in range(13, 6, -1):
-            if row_index < len(table.rows):
-                table._tbl.remove(table.rows[row_index]._tr)
-
-
 def add_subproject_section(document, heading, projects, data, template_table, template_heading, toc_entries=None, page_no=None):
     projects = [project for project in projects if project.get("rows")]
     if not projects:
