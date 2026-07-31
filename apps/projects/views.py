@@ -53,6 +53,62 @@ def write_project_workspace(project, workspace):
     project.save(update_fields=["data_file", "update_time"])
 
 
+def merge_project_workspace_patch(project, patch):
+    """Merge a small browser-side workspace patch into the stored full JSON.
+
+    Workspaces created before incremental saves remain valid because the file on
+    disk always keeps the original complete structure.  A session is the
+    smallest useful persistence unit: editing one sub-drawing only replaces
+    that sub-drawing's entry in ``tabData``.
+    """
+    if not isinstance(patch, dict):
+        raise ValidationError("工作区补丁格式不正确")
+
+    workspace = read_project_workspace(project)
+    if not isinstance(workspace, dict):
+        workspace = {
+            "activeTabId": None,
+            "nextTabId": 1,
+            "tabData": {},
+            "tabs": [],
+            "version": 1,
+        }
+
+    if "tabData" in patch:
+        tab_data_patch = patch["tabData"]
+        if not isinstance(tab_data_patch, dict):
+            raise ValidationError("工作区图例页补丁格式不正确")
+        existing_tab_data = workspace.get("tabData")
+        if not isinstance(existing_tab_data, dict):
+            existing_tab_data = {}
+        # JSON object keys are strings after persistence; normalize both old
+        # numeric and new string keys so a tab is never duplicated.
+        existing_tab_data = {str(key): value for key, value in existing_tab_data.items()}
+        for tab_id, session in tab_data_patch.items():
+            existing_tab_data[str(tab_id)] = session
+        workspace["tabData"] = existing_tab_data
+
+    if "removedTabIds" in patch:
+        removed_tab_ids = patch["removedTabIds"]
+        if not isinstance(removed_tab_ids, list):
+            raise ValidationError("已删除图例页补丁格式不正确")
+        existing_tab_data = workspace.get("tabData")
+        if isinstance(existing_tab_data, dict):
+            for tab_id in removed_tab_ids:
+                existing_tab_data.pop(str(tab_id), None)
+
+    if "tabs" in patch:
+        if not isinstance(patch["tabs"], list):
+            raise ValidationError("图例页列表补丁格式不正确")
+        workspace["tabs"] = patch["tabs"]
+
+    for key in ("activeTabId", "nextTabId", "version"):
+        if key in patch:
+            workspace[key] = patch[key]
+
+    write_project_workspace(project, workspace)
+
+
 class ProjectAccessMixin:
     authentication_classes = [TokenAuthenticate]
     permission_classes = [IsAuthenticated]
@@ -105,7 +161,13 @@ class ProjectDetailView(ProjectAccessMixin, APIView):
         project.save(update_fields=["name", "description", "update_time"])
         if "workspace" in request.data:
             write_project_workspace(project, request.data.get("workspace"))
-        return Response({"code": 200, "data": project_payload(project, True), "msg": "项目已保存"})
+            return Response({"code": 200, "data": project_payload(project, True), "msg": "项目已保存"})
+        if "workspace_patch" in request.data:
+            merge_project_workspace_patch(project, request.data.get("workspace_patch"))
+            # Do not echo the complete workspace back to the browser. It can be
+            # several megabytes and the client already owns the latest snapshot.
+            return Response({"code": 200, "data": project_payload(project), "msg": "项目增量保存成功"})
+        return Response({"code": 200, "data": project_payload(project), "msg": "项目已保存"})
 
     def delete(self, request, project_id):
         project = self.get_project(request, project_id)
