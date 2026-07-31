@@ -62,13 +62,13 @@ def custom_exception_handler(exc, context):
                 custom_response_data['code'] = StatusCode.NOT_FOUND_CODE
                 custom_response_data['message'] = "".join(error_messages)
 
-            # 处理权限错误
-            # elif response.status_code == 403:
-            #     error_messages = []
-            #     for field, messages in response.data.items():
-            #         error_messages.append(f"{field}: {''.join([str(msg) for msg in messages])}")
-            #     custom_response_data['code'] = StatusCode.PERMISSION_DENIED_CODE
-            #     custom_response_data['message'] = "".join(error_messages)
+            # AuthenticationFailed is represented by DRF as a 403 response
+            # with a ``detail`` field.  Keeping that detail is especially
+            # important for the login screen, where an empty response was
+            # previously mistaken for a generic network failure.
+            elif response.status_code == 403:
+                detail = response.data.get('detail', '')
+                custom_response_data['message'] = str(detail) or '无权执行此操作'
 
             # 处理认证错误
             elif response.status_code == 401:
