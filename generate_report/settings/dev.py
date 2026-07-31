@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'apps.users.apps.UserConfig',
     'apps.wordsite.apps.WordsiteConfig',
     'apps.projects.apps.ProjectsConfig',
+    'apps.legends.apps.LegendsConfig',
 
 ]
 

@@ -14,7 +14,6 @@ class TokenAuthenticate(BaseAuthentication):
             prefix = 'Bearer '
             if auth_header.startswith(prefix):
                 token = auth_header[len(prefix):]
-                print(token)
             else:
                 raise AuthenticationFailed("无效的认证前缀")
 
@@ -23,7 +22,7 @@ class TokenAuthenticate(BaseAuthentication):
             except Exception as e:
                 raise AuthenticationFailed("鉴权失败")
 
-            user = UserInfo.objects.filter(pk=validated_token['user_id']).first()
+            user = UserInfo.objects.filter(pk=validated_token['user_id'], is_delete=False).first()
             if user is None:
                 raise AuthenticationFailed("用户不存在")
 
