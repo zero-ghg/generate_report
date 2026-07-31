@@ -105,3 +105,32 @@ class LegendShareRedemption(BaseModel):
         ]
         verbose_name = "图例分享领取"
 
+
+class LegendCategoryShare(BaseModel):
+    """A shareable complete legend-library tab (category and all its items)."""
+
+    category = models.ForeignKey(LegendCategory, on_delete=models.CASCADE, related_name="shares", verbose_name="图例分类")
+    creator = models.ForeignKey(UserInfo, on_delete=models.CASCADE, related_name="legend_category_shares", verbose_name="分享人")
+    code = models.CharField(max_length=24, unique=True, db_index=True, verbose_name="分享码")
+    expires_at = models.DateTimeField(verbose_name="过期时间")
+    max_uses = models.PositiveIntegerField(null=True, blank=True, verbose_name="最大领取次数")
+    used_count = models.PositiveIntegerField(default=0, verbose_name="已领取次数")
+    is_revoked = models.BooleanField(default=False, verbose_name="已撤销")
+
+    class Meta:
+        db_table = "tb_legend_category_share"
+        ordering = ("-create_time", "-id")
+        verbose_name = "图例库分类分享"
+
+
+class LegendCategoryShareRedemption(BaseModel):
+    share = models.ForeignKey(LegendCategoryShare, on_delete=models.CASCADE, related_name="redemptions", verbose_name="图例库分享")
+    recipient = models.ForeignKey(UserInfo, on_delete=models.CASCADE, related_name="legend_category_share_redemptions", verbose_name="领取用户")
+    copied_category = models.OneToOneField(LegendCategory, on_delete=models.CASCADE, related_name="share_redemption", verbose_name="复制后的分类")
+
+    class Meta:
+        db_table = "tb_legend_category_share_redemption"
+        constraints = [
+            models.UniqueConstraint(fields=("share", "recipient"), name="uniq_legend_category_share_recipient"),
+        ]
+        verbose_name = "图例库分类分享领取"
