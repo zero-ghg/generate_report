@@ -53,6 +53,57 @@ def write_project_workspace(project, workspace):
     project.save(update_fields=["data_file", "update_time"])
 
 
+def apply_value_patches(value, operations):
+    """Apply small field-level changes to one persisted tab session."""
+    if not isinstance(operations, list):
+        raise ValidationError("图例页字段补丁格式不正确")
+
+    for operation in operations:
+        if not isinstance(operation, dict):
+            raise ValidationError("图例页字段补丁格式不正确")
+        action = operation.get("op")
+        path = operation.get("path")
+        if action not in {"set", "delete"} or not isinstance(path, list):
+            raise ValidationError("图例页字段补丁格式不正确")
+        if not path:
+            if action != "set":
+                raise ValidationError("图例页字段补丁路径不正确")
+            value = operation.get("value")
+            continue
+
+        target = value
+        for part in path[:-1]:
+            if isinstance(target, list):
+                if type(part) is not int or part < 0 or part >= len(target):
+                    raise ValidationError("图例页字段补丁路径不正确")
+                target = target[part]
+            elif isinstance(target, dict):
+                if not isinstance(part, str) or part not in target:
+                    raise ValidationError("图例页字段补丁路径不正确")
+                target = target[part]
+            else:
+                raise ValidationError("图例页字段补丁路径不正确")
+
+        final_part = path[-1]
+        if isinstance(target, list):
+            if type(final_part) is not int or final_part < 0 or final_part >= len(target):
+                raise ValidationError("图例页字段补丁路径不正确")
+            if action == "delete":
+                target.pop(final_part)
+            else:
+                target[final_part] = operation.get("value")
+        elif isinstance(target, dict):
+            if not isinstance(final_part, str):
+                raise ValidationError("图例页字段补丁路径不正确")
+            if action == "delete":
+                target.pop(final_part, None)
+            else:
+                target[final_part] = operation.get("value")
+        else:
+            raise ValidationError("图例页字段补丁路径不正确")
+    return value
+
+
 def merge_project_workspace_patch(project, patch):
     """Merge a small browser-side workspace patch into the stored full JSON.
 
@@ -96,6 +147,19 @@ def merge_project_workspace_patch(project, patch):
         if isinstance(existing_tab_data, dict):
             for tab_id in removed_tab_ids:
                 existing_tab_data.pop(str(tab_id), None)
+
+    if "tabPatches" in patch:
+        tab_patches = patch["tabPatches"]
+        if not isinstance(tab_patches, dict):
+            raise ValidationError("工作区图例页字段补丁格式不正确")
+        existing_tab_data = workspace.get("tabData")
+        if not isinstance(existing_tab_data, dict):
+            raise ValidationError("工作区中没有可更新的图例页数据")
+        for tab_id, operations in tab_patches.items():
+            normalized_tab_id = str(tab_id)
+            if normalized_tab_id not in existing_tab_data:
+                raise ValidationError(f"图例页 {normalized_tab_id} 不存在，无法应用字段补丁")
+            existing_tab_data[normalized_tab_id] = apply_value_patches(existing_tab_data[normalized_tab_id], operations)
 
     if "tabs" in patch:
         if not isinstance(patch["tabs"], list):
