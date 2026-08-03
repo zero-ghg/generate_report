@@ -1209,7 +1209,7 @@ def fill_summary_conclusion_cell(cell, conclusion):
         (items[1] if len(items) > 1 else "", WD_ALIGN_PARAGRAPH.LEFT),
         ("", WD_ALIGN_PARAGRAPH.LEFT),
         ("", WD_ALIGN_PARAGRAPH.LEFT),
-        ("", WD_ALIGN_PARAGRAPH.RIGHT),
+        ("检测机构（检测专用章）", WD_ALIGN_PARAGRAPH.RIGHT),
         ("", WD_ALIGN_PARAGRAPH.RIGHT),
         ("签发日期：       年     月     日", WD_ALIGN_PARAGRAPH.RIGHT),
     ]
@@ -2057,6 +2057,7 @@ def add_template_measurement_table(
             if row_index >= len(table.rows) - 1:
                 break
             fill_measurement_row(table, row_index, row_data, kind)
+    set_measurement_data_font_size(table, kind, size=9)
     stretch_table_remark_row(
         document,
         table,
@@ -2259,7 +2260,19 @@ def format_measurement_conductor_spec_column(table, kind):
         if row_index < measurement_first_data_row(kind):
             text = re.sub(r"\s+", "", cell.text)
             if "连接导体材料规格" in text:
-                set_cell(cell, "连接导体材料规格", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, size=8)
+                # 五号 = 10.5pt。该表头需要比下方小五号数据更醒目。
+                set_cell(cell, "连接导体材料规格", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, size=10.5)
+
+
+def set_measurement_data_font_size(table, kind, size):
+    """Normalize all measurement data rows, including unused placeholder rows, to 小五号."""
+    first_data_row = measurement_first_data_row(kind)
+    data_end_exclusive = len(table.rows) - 1 if table.rows and is_remark_table_row(table.rows[-1]) else len(table.rows)
+    for row_index in range(first_data_row, data_end_exclusive):
+        for cell in unique_row_cells(table.rows[row_index]):
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    set_run_font(run, size=size, bold=run.bold)
 
 
 def measurement_first_data_row(kind):
