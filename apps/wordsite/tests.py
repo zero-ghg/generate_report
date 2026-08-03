@@ -12,6 +12,7 @@ from apps.wordsite.scripts.generate_formatted_report import (
     expand_compact_subproject_category_column,
     extract_legend_canvases,
     fill_summary_table,
+    format_detection_type,
     merge_subproject_category_columns,
     measurement_group_capacity,
     repeat_measurement_header_rows,
@@ -45,6 +46,11 @@ from apps.wordsite.scripts.parse_dwg_workspace import (
 
 # DWG/DXF 工作区解析测试：验证图纸文字与检测表记录共享 id，并保留未匹配记录。
 class DwgWorkspaceParserTests(SimpleTestCase):
+    def test_formats_detection_type_with_one_selected_option(self):
+        self.assertEqual(format_detection_type("验收检测"), "☑验收检测  □定期检测")
+        self.assertEqual(format_detection_type("定期检测"), "□验收检测  ☑定期检测")
+        self.assertEqual(format_detection_type("□验收检测 定期检测"), "□验收检测  ☑定期检测")
+
     def test_nearby_stacked_triangle_marker_is_matched_beyond_legacy_radius(self):
         """A label may sit just over 30 CAD units from its two-part arrow."""
         text = {"id": 10, "text": "D11", "x": 0, "y": 0, "importedSourceHandles": ["TEXT"]}
