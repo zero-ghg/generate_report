@@ -633,7 +633,7 @@ def append_report_body(document, data, template_tables, template_heading):
     chapter_index = 1
 
     body_section_index = len(document.sections) - 1
-    start_report_body_section(document)
+    start_report_body_section(document, data)
     heading = chapter_heading(chapter_index, "总表")
     add_heading(document, heading, template_heading, break_before=False)
     toc_entries.append((heading, page_no))
@@ -829,10 +829,60 @@ def first_report_heading_paragraph(document):
     return None
 
 
-def start_report_body_section(document):
+def start_report_body_section(document, data):
     section = document.sections[-1]
     restart_section_page_numbering(section)
+    write_body_section_header(section, data)
     write_body_section_footer(section)
+
+
+def write_body_section_header(section, data):
+    """Write the official header used by the report body, beginning with the summary."""
+    cover = cover_data(data)
+    agency_name = cover_value(cover, "inspectorName", "agencyName")
+    report_number = cover_value(cover, "reportNumber", "reportNo", "reportCode")
+
+    section.header.is_linked_to_previous = False
+    paragraph = section.header.paragraphs[0] if section.header.paragraphs else section.header.add_paragraph()
+    clear_paragraph_runs(paragraph)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+
+    # A right tab keeps the report number aligned to the printable right edge,
+    # regardless of the length of the agency name or report number.
+    available_width = max(
+        int(section.page_width.twips - section.left_margin.twips - section.right_margin.twips),
+        1,
+    )
+    p_pr = paragraph._p.get_or_add_pPr()
+    tabs = p_pr.find(qn("w:tabs"))
+    if tabs is not None:
+        p_pr.remove(tabs)
+    tabs = OxmlElement("w:tabs")
+    tab = OxmlElement("w:tab")
+    tab.set(qn("w:val"), "right")
+    tab.set(qn("w:pos"), str(available_width))
+    tabs.append(tab)
+    p_pr.append(tabs)
+
+    borders = p_pr.find(qn("w:pBdr"))
+    if borders is not None:
+        p_pr.remove(borders)
+    borders = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "4")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "808080")
+    borders.append(bottom)
+    p_pr.append(borders)
+
+    left_run = paragraph.add_run(str(agency_name))
+    right_run = paragraph.add_run(f"\t报告编号：{report_number}")
+    for run in (left_run, right_run):
+        set_run_font(run, size=9, bold=False)
+        run.font.color.rgb = RGBColor(89, 89, 89)
 
 
 def set_body_section_footer(section, total_pages=None):
@@ -983,7 +1033,7 @@ def fill_summary_table(table, data):
     set_summary_field_cell(table.cell(3, 14), general, "contactPhone", align=WD_ALIGN_PARAGRAPH.CENTER)
     set_summary_field_cell(table.cell(4, 3), general, "inspectedDate", align=WD_ALIGN_PARAGRAPH.CENTER)
     set_summary_field_cell(table.cell(5, 3), general, "nextDate", align=WD_ALIGN_PARAGRAPH.CENTER)
-    set_summary_field_cell(table.cell(5, 11), general, "detectionType", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_detection_type_cell(table.cell(5, 11), general.get("detectionType"))
     set_summary_field_cell(table.cell(6, 3), general, "detectionBasis", align=WD_ALIGN_PARAGRAPH.LEFT)
 
     layout = summary_table_layout(table)
@@ -1019,7 +1069,7 @@ def fill_summary_table_compact(table, general, project_items, equipment):
     set_summary_field_cell(table.cell(3, 15), general, "contactPhone", align=WD_ALIGN_PARAGRAPH.CENTER)
     set_summary_field_cell(table.cell(4, 3), general, "inspectedDate", align=WD_ALIGN_PARAGRAPH.CENTER)
     set_summary_field_cell(table.cell(5, 3), general, "nextDate", align=WD_ALIGN_PARAGRAPH.CENTER)
-    set_summary_field_cell(table.cell(5, 12), general, "detectionType", align=WD_ALIGN_PARAGRAPH.CENTER)
+    set_detection_type_cell(table.cell(5, 12), general.get("detectionType"))
     set_summary_field_cell(table.cell(6, 3), general, "detectionBasis", align=WD_ALIGN_PARAGRAPH.LEFT)
 
     layout = summary_table_layout(table)
@@ -1304,12 +1354,50 @@ def add_subproject_section(document, heading, projects, data, template_table, te
     return len(projects)
 
 
+def normalized_detection_type(raw):
+    text = str(raw or "").replace(" ", "")
+    if text == "验收检测" or any(marker in text for marker in ("☑验收检测", "√验收检测", "✔验收检测")):
+        return "验收检测"
+    if text == "定期检测" or any(marker in text for marker in ("☑定期检测", "√定期检测", "✔定期检测")):
+        return "定期检测"
+    # 兼容早期导入后丢失已选方框的旧值：`□验收检测 定期检测`。
+    # 该格式表示验收检测未选中，因此将定期检测补成已选状态。
+    if "验收检测" in text and "定期检测" in text:
+        if "□验收检测" in text and "□定期检测" not in text:
+            return "定期检测"
+        if "□定期检测" in text and "□验收检测" not in text:
+            return "验收检测"
+    return None
+
+
 def format_detection_type(raw):
-    if raw == "验收检测":
+    selected = normalized_detection_type(raw)
+    if selected == "验收检测":
         return "☑验收检测  □定期检测"
-    if raw == "定期检测":
+    if selected == "定期检测":
         return "□验收检测  ☑定期检测"
     return raw
+
+
+def set_detection_type_cell(cell, raw):
+    selected = normalized_detection_type(raw)
+    if selected not in {"验收检测", "定期检测"}:
+        set_cell(cell, raw, align=WD_ALIGN_PARAGRAPH.CENTER)
+        return
+
+    # 按模板样式拆成独立文字段：未选项文字标红，方框和对勾始终使用宋体。
+    # 这样 WPS 与 Word 都会稳定渲染为“□ / ☑”，不会受单元格残留字体影响。
+    set_cell_segments(
+        cell,
+        [
+            {"text": "☑" if selected == "验收检测" else "□", "color": None},
+            {"text": "验收检测", "color": None if selected == "验收检测" else "#ff0000"},
+            {"text": "  ", "color": None},
+            {"text": "☑" if selected == "定期检测" else "□", "color": None},
+            {"text": "定期检测", "color": None if selected == "定期检测" else "#ff0000"},
+        ],
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+    )
 
 
 def add_subproject_table(document, project, data, template_table, has_section_heading=False):
