@@ -7,6 +7,7 @@ from apps.legends.view.views import (
     LegendCategoryShareView,
     LegendDetailView,
     LegendImportView,
+    LegendDrawnCreateView,
     LegendListView,
 )
 
@@ -14,6 +15,7 @@ from apps.legends.view.views import (
 urlpatterns = [
     path("", LegendListView.as_view()),
     path("import/", LegendImportView.as_view()),
+    path("drawn/", LegendDrawnCreateView.as_view()),
     path("categories/", LegendCategoryListView.as_view()),
     path("categories/<int:category_id>/", LegendCategoryDetailView.as_view()),
     path("categories/<int:category_id>/share/", LegendCategoryShareView.as_view()),

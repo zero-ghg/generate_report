@@ -263,6 +263,40 @@ class LegendImportView(LegendAccessMixin, APIView):
         )
 
 
+# 保存由前端绘图区域创建的图例。预览 SVG 是唯一渲染来源，解析数据仅供后续扩展。
+class LegendDrawnCreateView(LegendAccessMixin, APIView):
+    def post(self, request):
+        name = str(request.data.get("name") or "").strip()
+        if not name or len(name) > 120:
+            raise ValidationError("请输入 1-120 位图例名称")
+        preview_svg = str(request.data.get("preview_svg") or "")
+        if "<svg" not in preview_svg[:500].lower():
+            raise ValidationError("自绘图例内容无效")
+        category = get_target_category(request.user, request.data.get("category_id"))
+        duplicate_query = Legend.objects.filter(category=category, name=name, is_delete=False)
+        duplicate_query = duplicate_query.filter(is_system=True) if category.is_system else duplicate_query.filter(owner=request.user)
+        if duplicate_query.exists():
+            raise ValidationError("当前分类下已存在同名图例")
+        parsed_data = request.data.get("parsed_data")
+        if not isinstance(parsed_data, dict):
+            parsed_data = {}
+        legend = Legend.objects.create(
+            category=category,
+            name=name,
+            original_filename=f"{name}.svg",
+            content_type="image/svg+xml",
+            parsed_data=parsed_data,
+            preview_svg=preview_svg,
+            source_type="drawn",
+            owner=request.user,
+            is_system=category.is_system,
+        )
+        return Response(
+            {"code": 201, "data": legend_payload(legend, include_data=True), "msg": "自绘图例已入库"},
+            status=status.HTTP_201_CREATED,
+        )
+
+
 # 查询、修改或软删除指定图例及其相关分享记录。
 class LegendDetailView(LegendAccessMixin, APIView):
     def get(self, request, legend_id):

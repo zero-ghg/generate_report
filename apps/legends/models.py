@@ -26,6 +26,7 @@ class LegendCategory(BaseModel):
 class Legend(BaseModel):
     SOURCE_CHOICES = (
         ("dwg", "DWG 导入"),
+        ("drawn", "自行绘制"),
         ("shared", "分享复制"),
         ("system", "系统预置"),
     )
