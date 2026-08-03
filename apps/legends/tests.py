@@ -1,12 +1,10 @@
-from datetime import timedelta
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
-from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.legends.models import Legend, LegendCategory, LegendShare, LegendShareRedemption
+from apps.legends.models import Legend, LegendCategory
 from apps.users.models import UserInfo
 
 
@@ -30,8 +28,6 @@ class LegendApiTests(TestCase):
             category=category,
             name=name,
             original_filename=f"{name}.dwg",
-            source_file=b"dwg-bytes",
-            source_size=9,
             parsed_data={"workspace": {"version": 2}},
             preview_svg="<svg></svg>",
             source_type="system" if is_system else "dwg",
@@ -44,7 +40,7 @@ class LegendApiTests(TestCase):
         ids = {item["id"] for item in response.data["data"]}
         self.assertEqual(ids, {self.system_legend.id, self.owner_legend.id})
 
-    @patch("apps.legends.views.parse_dwg_workspace.parse_dwg_workspace")
+    @patch("apps.legends.view.views.parse_dwg_workspace.parse_dwg_workspace")
     def test_import_saves_original_file_and_parsed_workspace(self, parse):
         parse.return_value = {"workspace": {"version": 2}, "stats": {"paths": 1}}
         upload = SimpleUploadedFile("自定义图例.dwg", b"one-legend-dwg", content_type="application/acad")
@@ -61,10 +57,9 @@ class LegendApiTests(TestCase):
         self.assertEqual(response.status_code, 201)
         legend = Legend.objects.get(id=response.data["data"]["id"])
         self.assertEqual(legend.owner, self.owner)
-        self.assertEqual(bytes(legend.source_file), b"one-legend-dwg")
         self.assertEqual(legend.parsed_data["workspace"]["version"], 2)
 
-    @patch("apps.legends.views.parse_dwg_workspace.parse_dwg_workspace")
+    @patch("apps.legends.view.views.parse_dwg_workspace.parse_dwg_workspace")
     def test_import_allows_same_name_and_file_in_different_category(self, parse):
         parse.return_value = {"workspace": {"version": 2}, "stats": {"paths": 1}}
         second_category = LegendCategory.objects.create(name="122", owner=self.owner, sort_order=2)
@@ -86,7 +81,30 @@ class LegendApiTests(TestCase):
         self.assertEqual(created.category_id, second_category.id)
         self.assertEqual(created.original_filename, "风机.dwg")
 
-    @patch("apps.legends.views.parse_dwg_workspace.parse_dwg_workspace")
+    @patch("apps.legends.view.views.parse_dwg_workspace.parse_dwg_workspace")
+    def test_import_into_system_category_is_visible_to_all_users(self, parse):
+        parse.return_value = {"workspace": {"version": 2}, "stats": {"paths": 1}}
+        upload = SimpleUploadedFile("public-fan.dwg", b"public-fan", content_type="application/acad")
+        response = self.client.post(
+            "/api/v1/legends/import/",
+            {
+                "category_id": self.system_category.id,
+                "file": upload,
+                "name": "public-fan",
+                "preview_svg": "<svg viewBox='0 0 10 10'></svg>",
+            },
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 201)
+        created = Legend.objects.get(id=response.data["data"]["id"])
+        self.assertTrue(created.is_system)
+        self.assertEqual(created.owner, self.owner)
+
+        self.client.force_authenticate(self.other)
+        visible = self.client.get("/api/v1/legends/")
+        self.assertIn(created.id, {item["id"] for item in visible.data["data"]})
+
+    @patch("apps.legends.view.views.parse_dwg_workspace.parse_dwg_workspace")
     def test_import_rejects_same_name_in_same_category(self, parse):
         parse.return_value = {"workspace": {"version": 2}, "stats": {"paths": 1}}
         upload = SimpleUploadedFile("重复.dwg", b"dup-dwg", content_type="application/acad")
@@ -115,49 +133,6 @@ class LegendApiTests(TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertNotEqual(second.data["code"], 201)
         self.assertIn("同名图例", second.data["message"])
-
-    def test_redeem_creates_an_independent_copy(self):
-        share = LegendShare.objects.create(
-            legend=self.other_legend,
-            creator=self.other,
-            code="ABCD-2345",
-            expires_at=timezone.now() + timedelta(days=7),
-        )
-        response = self.client.post(
-            "/api/v1/legends/shares/redeem/",
-            {"share_code": "abcd2345", "category_id": self.owner_category.id},
-            format="json",
-        )
-        self.assertEqual(response.status_code, 201)
-        copied = Legend.objects.get(id=response.data["data"]["id"])
-        self.assertEqual(copied.owner, self.owner)
-        self.assertEqual(copied.source_legend, self.other_legend)
-        self.assertNotEqual(copied.id, self.other_legend.id)
-        self.assertEqual(bytes(copied.source_file), bytes(self.other_legend.source_file))
-        self.assertTrue(
-            LegendShareRedemption.objects.filter(share=share, recipient=self.owner, copied_legend=copied).exists()
-        )
-
-    def test_expired_share_cannot_be_redeemed(self):
-        LegendShare.objects.create(
-            legend=self.other_legend,
-            creator=self.other,
-            code="WXYZ-6789",
-            expires_at=timezone.now() - timedelta(seconds=1),
-        )
-        response = self.client.post(
-            "/api/v1/legends/shares/redeem/",
-            {"share_code": "WXYZ-6789"},
-            format="json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["message"], "分享码已过期")
-        self.assertFalse(Legend.objects.filter(owner=self.owner, source_legend=self.other_legend).exists())
-
-    def test_other_users_private_file_is_not_accessible(self):
-        response = self.client.get(f"/api/v1/legends/{self.other_legend.id}/file/")
-        self.assertEqual(response.status_code, 200)
-        self.assertNotEqual(response.data["code"], 200)
 
     def test_owner_can_update_and_delete_own_legend(self):
         update = self.client.put(

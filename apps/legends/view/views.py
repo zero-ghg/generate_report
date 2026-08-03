@@ -2,13 +2,11 @@ import copy
 import re
 import secrets
 from datetime import timedelta
-from io import BytesIO
 from pathlib import Path
 
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
-from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -21,8 +19,6 @@ from apps.legends.models import (
     LegendCategory,
     LegendCategoryShare,
     LegendCategoryShareRedemption,
-    LegendShare,
-    LegendShareRedemption,
 )
 from apps.wordsite.scripts import parse_dwg_workspace
 from generate_report.utils.auth import TokenAuthenticate
@@ -41,49 +37,21 @@ def category_payload(category):
     }
 
 
-def ensure_system_legends():
-    """Provision the packaged starter library the first time it is requested.
+def normalize_system_category_visibility():
+    """Keep every legend in the system category visible to all users.
 
-    Older installations created the database before the library moved from
-    browser localStorage to the API, leaving their system category empty.
-    Storing the packaged DWGs here restores the same starter items for every
-    user without requiring a one-off manual import command.
+    System starter data is managed explicitly through the database or the
+    import command; API reads must never import files from a local directory.
     """
-    source_dir = Path(settings.BASE_DIR).parent.parent / "frontend" / "public" / "legend-presets"
-    if not source_dir.is_dir():
-        return
-    category, _ = LegendCategory.objects.get_or_create(
-        owner=None,
-        is_system=True,
+    # Visibility follows the category: every legend in the system "通用"
+    # category is public.  This also repairs records created by the earlier
+    # owner-based implementation, where an administrator's upload in 通用 was
+    # incorrectly private to that administrator.
+    Legend.objects.filter(
+        category__is_system=True,
+        is_system=False,
         is_delete=False,
-        defaults={"name": "通用", "sort_order": 0},
-    )
-    # A deployment that already has any system legend is already initialized.
-    # This also avoids injecting starter items into a deliberately curated
-    # system category.
-    if Legend.objects.filter(category=category, is_system=True, is_delete=False).exists():
-        return
-    existing = set(
-        Legend.objects.filter(category=category, is_system=True, is_delete=False).values_list("original_filename", flat=True)
-    )
-    for path in sorted(source_dir.glob("*.dwg"), key=lambda item: item.name):
-        if path.name in existing:
-            continue
-        file_bytes = path.read_bytes()
-        Legend.objects.create(
-            owner=None,
-            category=category,
-            name=path.stem,
-            original_filename=path.name,
-            content_type="application/acad",
-            source_file=file_bytes,
-            source_size=len(file_bytes),
-            parsed_data={},
-            preview_svg="",
-            source_type="system",
-            is_system=True,
-        )
-
+    ).update(is_system=True)
 
 def legend_payload(legend, include_data=False):
     data = {
@@ -94,9 +62,7 @@ def legend_payload(legend, include_data=False):
         "is_system": legend.is_system,
         "source_type": legend.source_type,
         "original_filename": legend.original_filename,
-        "source_size": legend.source_size,
         "preview_svg": legend.preview_svg,
-        "file_url": f"/api/v1/legends/{legend.id}/file/",
         "create_time": legend.create_time,
         "update_time": legend.update_time,
     }
@@ -104,19 +70,6 @@ def legend_payload(legend, include_data=False):
         data["parsed_data"] = legend.parsed_data
         data["source_legend_id"] = legend.source_legend_id
     return data
-
-
-def share_payload(share):
-    return {
-        "id": share.id,
-        "share_code": share.code,
-        "legend_id": share.legend_id,
-        "legend_name": share.legend.name,
-        "expires_at": share.expires_at,
-        "max_uses": share.max_uses,
-        "used_count": share.used_count,
-        "is_revoked": share.is_revoked,
-    }
 
 
 def category_share_payload(share):
@@ -179,7 +132,7 @@ def generate_share_code():
     for _ in range(20):
         raw = "".join(secrets.choice(SHARE_CODE_ALPHABET) for _ in range(8))
         code = f"{raw[:4]}-{raw[4:]}"
-        if not LegendShare.objects.filter(code=code).exists():
+        if not LegendCategoryShare.objects.filter(code=code).exists():
             return code
     raise RuntimeError("无法生成唯一分享码")
 
@@ -189,14 +142,16 @@ def normalized_share_code(value):
     return f"{compact[:4]}-{compact[4:8]}" if len(compact) == 8 else str(value or "").strip().upper()
 
 
+# 为所有图例接口统一配置令牌认证和登录权限校验。
 class LegendAccessMixin:
     authentication_classes = [TokenAuthenticate]
     permission_classes = [IsAuthenticated]
 
 
+# 查询当前用户可访问的图例分类，并负责创建用户自定义分类。
 class LegendCategoryListView(LegendAccessMixin, APIView):
     def get(self, request):
-        ensure_system_legends()
+        normalize_system_category_visibility()
         categories = accessible_categories(request.user).order_by("-is_system", "sort_order", "id")
         return Response({"code": 200, "data": [category_payload(item) for item in categories]})
 
@@ -214,6 +169,7 @@ class LegendCategoryListView(LegendAccessMixin, APIView):
         )
 
 
+# 修改或软删除当前用户拥有的指定图例分类。
 class LegendCategoryDetailView(LegendAccessMixin, APIView):
     def put(self, request, category_id):
         category = LegendCategory.objects.filter(id=category_id, owner=request.user, is_delete=False).first()
@@ -239,9 +195,10 @@ class LegendCategoryDetailView(LegendAccessMixin, APIView):
         return Response({"code": 200, "msg": "分类已删除"})
 
 
+# 按分类或关键字查询当前用户可访问的图例列表。
 class LegendListView(LegendAccessMixin, APIView):
     def get(self, request):
-        ensure_system_legends()
+        normalize_system_category_visibility()
         legends = accessible_legends(request.user)
         category_id = request.query_params.get("category_id")
         if category_id:
@@ -252,6 +209,7 @@ class LegendListView(LegendAccessMixin, APIView):
         return Response({"code": 200, "data": [legend_payload(item) for item in legends]})
 
 
+# 接收并解析上传的 DWG 文件，将其保存为可复用的图例。
 class LegendImportView(LegendAccessMixin, APIView):
     def post(self, request):
         upload = request.FILES.get("file") or request.FILES.get("dwg")
@@ -267,8 +225,14 @@ class LegendImportView(LegendAccessMixin, APIView):
         if not name or len(name) > 120:
             raise ValidationError("请输入 1-120 位图例名称")
         category = get_target_category(request.user, request.data.get("category_id"))
-        # 同名仅限制在同一分类内；不同图例库可入库相同 DWG / 相同名称。
-        if Legend.objects.filter(owner=request.user, category=category, name=name, is_delete=False).exists():
+        # 通用分类是全员共享的，同名校验也必须面向全体用户；私人分类仍然
+        # 只校验当前用户自己的图例。
+        duplicate_query = Legend.objects.filter(category=category, name=name, is_delete=False)
+        if category.is_system:
+            duplicate_query = duplicate_query.filter(is_system=True)
+        else:
+            duplicate_query = duplicate_query.filter(owner=request.user)
+        if duplicate_query.exists():
             raise ValidationError("当前分类下已存在同名图例")
 
         file_bytes = upload.read()
@@ -278,19 +242,20 @@ class LegendImportView(LegendAccessMixin, APIView):
             raise ValidationError(str(exc)) from exc
 
         preview_svg = str(request.data.get("preview_svg") or "")
-        if preview_svg and "<svg" not in preview_svg[:500].lower():
-            raise ValidationError("图例预览格式不正确")
+        if "<svg" not in preview_svg[:500].lower():
+            raise ValidationError("图例预览生成失败，请确认该 DWG 是可识别的单图块文件后重试")
         legend = Legend.objects.create(
-            owner=request.user,
             category=category,
             name=name,
             original_filename=filename,
             content_type=str(getattr(upload, "content_type", "") or "application/acad")[:100],
-            source_file=file_bytes,
-            source_size=len(file_bytes),
             parsed_data=parsed,
             preview_svg=preview_svg,
-            source_type="dwg",
+            source_type="system" if category.is_system else "dwg",
+            # owner records the publisher for later edit/delete auditing;
+            # is_system controls visibility and is determined by the category.
+            owner=request.user,
+            is_system=category.is_system,
         )
         return Response(
             {"code": 201, "data": legend_payload(legend, include_data=True), "msg": "图例已入库"},
@@ -298,6 +263,7 @@ class LegendImportView(LegendAccessMixin, APIView):
         )
 
 
+# 查询、修改或软删除指定图例及其相关分享记录。
 class LegendDetailView(LegendAccessMixin, APIView):
     def get(self, request, legend_id):
         return Response({"code": 200, "data": legend_payload(get_accessible_legend(request.user, legend_id), True)})
@@ -333,122 +299,10 @@ class LegendDetailView(LegendAccessMixin, APIView):
         legend = get_writable_legend(request.user, legend_id)
         legend.is_delete = True
         legend.save(update_fields=["is_delete", "update_time"])
-        LegendShare.objects.filter(legend=legend, is_delete=False).update(is_revoked=True)
         return Response({"code": 200, "msg": "图例已删除"})
 
 
-class LegendFileView(LegendAccessMixin, APIView):
-    def get(self, request, legend_id):
-        legend = get_accessible_legend(request.user, legend_id)
-        response = FileResponse(
-            BytesIO(bytes(legend.source_file)),
-            content_type=legend.content_type or "application/acad",
-            filename=legend.original_filename,
-        )
-        response["Cache-Control"] = "private, max-age=3600"
-        return response
-
-
-class LegendShareView(LegendAccessMixin, APIView):
-    def post(self, request, legend_id):
-        legend = get_writable_legend(request.user, legend_id)
-        if legend.is_system or legend.owner_id != request.user.id:
-            raise PermissionDenied("只能分享自己的图例")
-        try:
-            expires_in_days = int(request.data.get("expires_in_days", 7))
-        except (TypeError, ValueError) as exc:
-            raise ValidationError("分享有效期格式不正确") from exc
-        if expires_in_days < 1 or expires_in_days > 365:
-            raise ValidationError("分享有效期必须在 1-365 天之间")
-        max_uses = request.data.get("max_uses")
-        if max_uses not in (None, ""):
-            try:
-                max_uses = int(max_uses)
-            except (TypeError, ValueError) as exc:
-                raise ValidationError("最大领取次数格式不正确") from exc
-            if max_uses < 1 or max_uses > 10000:
-                raise ValidationError("最大领取次数必须在 1-10000 之间")
-        else:
-            max_uses = None
-        share = LegendShare.objects.create(
-            legend=legend,
-            creator=request.user,
-            code=generate_share_code(),
-            expires_at=timezone.now() + timedelta(days=expires_in_days),
-            max_uses=max_uses,
-        )
-        return Response(
-            {"code": 201, "data": share_payload(share), "msg": "分享码已生成"},
-            status=status.HTTP_201_CREATED,
-        )
-
-
-class LegendShareDetailView(LegendAccessMixin, APIView):
-    def delete(self, request, share_id):
-        share = LegendShare.objects.filter(id=share_id, creator=request.user, is_delete=False).first()
-        if not share:
-            raise NotFound("分享记录不存在")
-        share.is_revoked = True
-        share.save(update_fields=["is_revoked", "update_time"])
-        return Response({"code": 200, "msg": "分享码已撤销"})
-
-
-class LegendShareRedeemView(LegendAccessMixin, APIView):
-    @transaction.atomic
-    def post(self, request):
-        code = normalized_share_code(request.data.get("share_code"))
-        share = (
-            LegendShare.objects.select_for_update()
-            .select_related("legend", "creator")
-            .filter(code=code, is_delete=False)
-            .first()
-        )
-        if not share:
-            raise NotFound("分享码不存在")
-        if share.is_revoked:
-            raise ValidationError("分享码已被撤销")
-        if timezone.now() >= share.expires_at:
-            raise ValidationError("分享码已过期")
-        if share.legend.is_delete:
-            raise ValidationError("原图例已被删除")
-        if share.max_uses is not None and share.used_count >= share.max_uses:
-            raise ValidationError("分享码领取次数已用完")
-        if share.creator_id == request.user.id:
-            raise ValidationError("不能领取自己创建的分享码")
-        existing = LegendShareRedemption.objects.select_related("copied_legend").filter(
-            share=share,
-            recipient=request.user,
-            is_delete=False,
-        ).first()
-        if existing and not existing.copied_legend.is_delete:
-            raise ValidationError("你已经领取过这个分享码")
-
-        category = get_target_category(request.user, request.data.get("category_id"))
-        copy_name = str(request.data.get("name") or share.legend.name).strip()[:120] or share.legend.name
-        if Legend.objects.filter(owner=request.user, category=category, name=copy_name, is_delete=False).exists():
-            copy_name = f"{copy_name}（分享）"[:120]
-        copied = Legend.objects.create(
-            owner=request.user,
-            category=category,
-            name=copy_name,
-            original_filename=share.legend.original_filename,
-            content_type=share.legend.content_type,
-            source_file=bytes(share.legend.source_file),
-            source_size=share.legend.source_size,
-            parsed_data=copy.deepcopy(share.legend.parsed_data),
-            preview_svg=share.legend.preview_svg,
-            source_type="shared",
-            source_legend=share.legend,
-        )
-        LegendShareRedemption.objects.create(share=share, recipient=request.user, copied_legend=copied)
-        share.used_count += 1
-        share.save(update_fields=["used_count", "update_time"])
-        return Response(
-            {"code": 201, "data": legend_payload(copied, True), "msg": "图例已添加到你的图例库"},
-            status=status.HTTP_201_CREATED,
-        )
-
-
+# 为当前用户拥有的整个图例分类创建分享码。
 class LegendCategoryShareView(LegendAccessMixin, APIView):
     def post(self, request, category_id):
         category = LegendCategory.objects.filter(id=category_id, owner=request.user, is_delete=False).first()
@@ -474,6 +328,7 @@ class LegendCategoryShareView(LegendAccessMixin, APIView):
         )
 
 
+# 校验并领取分类分享码，将分类及其中的图例复制给当前用户。
 class LegendCategoryShareRedeemView(LegendAccessMixin, APIView):
     @transaction.atomic
     def post(self, request):
@@ -516,8 +371,6 @@ class LegendCategoryShareRedeemView(LegendAccessMixin, APIView):
                 name=legend.name,
                 original_filename=legend.original_filename,
                 content_type=legend.content_type,
-                source_file=bytes(legend.source_file),
-                source_size=legend.source_size,
                 parsed_data=copy.deepcopy(legend.parsed_data),
                 preview_svg=legend.preview_svg,
                 source_type="shared",

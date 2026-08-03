@@ -1,17 +1,13 @@
 from django.urls import path
 
-from apps.legends.views import (
+from apps.legends.view.views import (
     LegendCategoryDetailView,
     LegendCategoryListView,
     LegendCategoryShareRedeemView,
     LegendCategoryShareView,
     LegendDetailView,
-    LegendFileView,
     LegendImportView,
     LegendListView,
-    LegendShareDetailView,
-    LegendShareRedeemView,
-    LegendShareView,
 )
 
 
@@ -22,9 +18,5 @@ urlpatterns = [
     path("categories/<int:category_id>/", LegendCategoryDetailView.as_view()),
     path("categories/<int:category_id>/share/", LegendCategoryShareView.as_view()),
     path("category-shares/redeem/", LegendCategoryShareRedeemView.as_view()),
-    path("shares/redeem/", LegendShareRedeemView.as_view()),
-    path("shares/<int:share_id>/", LegendShareDetailView.as_view()),
     path("<int:legend_id>/", LegendDetailView.as_view()),
-    path("<int:legend_id>/file/", LegendFileView.as_view()),
-    path("<int:legend_id>/share/", LegendShareView.as_view()),
 ]

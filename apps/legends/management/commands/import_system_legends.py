@@ -46,8 +46,6 @@ class Command(BaseCommand):
                 "category": category,
                 "original_filename": file_path.name,
                 "content_type": "application/acad",
-                "source_file": file_bytes,
-                "source_size": len(file_bytes),
                 "parsed_data": parsed,
                 "source_type": "system",
                 "is_system": True,
