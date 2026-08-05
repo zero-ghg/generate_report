@@ -1887,7 +1887,7 @@ def _marker_target_from_text(text, paths):
     # outs are very close.  Prefer the candidate aligned with the label on
     # either axis (the usual marker/label relationship) before using distance
     # as the final tie-breaker.
-    _, _, _, marker, marker_box = min(
+    selected_distance, _, _, marker, marker_box = min(
         candidates,
         key=lambda item: (
             item[0] + min(abs(item[1] - text_x), abs(item[2] - text_y)) * 0.75,
@@ -1938,6 +1938,17 @@ def _marker_target_from_text(text, paths):
         None,
     )
 
+    # A nearby triangle is a complete test-point marker by itself.  Only when
+    # the label has to fall back to a more distant arrow do we need to recover
+    # an optional CAD callout handle.  Keeping the two cases separate prevents
+    # normal pipeline segments that happen to meet an arrow tip from becoming
+    # part of the test point (for example the S2 callout).
+    # Around 18 drawing units still represents a label seated immediately
+    # beside its triangle.  Larger gaps are CAD callouts (such as SC2 above a
+    # connector) and need the fallback handle recovery below.
+    direct_marker_distance = min(marker_distance_limit, 18.0)
+    uses_fallback_marker = selected_distance > direct_marker_distance
+
     # CAD arrowheads are often encoded as a filled HATCH plus four short
     # outline segments.  The HATCH is enough to recognise the marker, but the
     # outline segments must share its interaction group as well; otherwise a
@@ -1962,62 +1973,77 @@ def _marker_target_from_text(text, paths):
             marker_parts.append(path)
             marker_ids.add(path_id)
 
-    # A detection callout can be drawn as “lead line + triangular arrow”.
-    # Once the unclaimed arrow has been selected, retain the short collinear
-    # lead line(s) as part of the same marker interaction group.  Stop before
-    # a line reaches another triangle so neighbouring test points never get
-    # merged or claimed by this fallback.
-    lead_box = dict(combined_box)
-    lead_axis_tolerance = max(min(lead_box["width"], lead_box["height"]) * 0.55, 1.0)
-    max_lead_length = max(48.0, max(lead_box["width"], lead_box["height"]) * 8)
-    for _ in range(4):
-        added = False
-        for path in paths:
-            path_id = int(path.get("id") or 0)
-            points = path.get("points") or []
-            if (
-                path_id in marker_ids
-                or str(path.get("name") or "").upper() != "LINE"
-                or path.get("closed")
-                or len(points) != 2
-            ):
-                continue
-            start = {"x": float(points[0].get("x") or 0), "y": float(points[0].get("y") or 0)}
-            end = {"x": float(points[1].get("x") or 0), "y": float(points[1].get("y") or 0)}
-            length = math.hypot(end["x"] - start["x"], end["y"] - start["y"])
-            if length > max_lead_length:
-                continue
-            is_horizontal = abs(end["y"] - start["y"]) <= lead_axis_tolerance
-            is_vertical = abs(end["x"] - start["x"]) <= lead_axis_tolerance
-            if triangle_side in {"left", "right"} and not is_horizontal:
-                continue
-            if triangle_side in {"top", "bottom"} and not is_vertical:
-                continue
-            if not _boxes_touch(lead_box, _path_box(path), lead_axis_tolerance):
-                continue
-            # Do not walk from this callout into the next marker through a
-            # shared horizontal/vertical CAD line.
-            reaches_foreign_triangle = False
-            for other in paths:
-                other_id = int(other.get("id") or 0)
-                if other_id in marker_ids or not other.get("closed") or _triangle_side_from_path(other) is None:
-                    continue
-                other_box = _path_box(other)
-                if any(
-                    other_box["x"] - lead_axis_tolerance <= point["x"] <= other_box["x"] + other_box["width"] + lead_axis_tolerance
-                    and other_box["y"] - lead_axis_tolerance <= point["y"] <= other_box["y"] + other_box["height"] + lead_axis_tolerance
-                    for point in (start, end)
+    # A fallback detection callout can be drawn as “handle + triangular
+    # arrow”.  Retain only the short collinear handle attached to the *tail*
+    # of the selected triangle.  A line attached to its tip is part of the
+    # process pipeline, not the test point, and must never be absorbed.
+    if uses_fallback_marker:
+        lead_box = dict(combined_box)
+        lead_axis_tolerance = max(min(lead_box["width"], lead_box["height"]) * 0.55, 1.0)
+        max_lead_length = max(48.0, max(lead_box["width"], lead_box["height"]) * 8)
+        tip_tolerance = max(lead_axis_tolerance, min(combined_box["width"], combined_box["height"]) * 0.18)
+
+        def touches_arrow_tip(point):
+            if triangle_side == "left":
+                return point["x"] <= combined_box["x"] + tip_tolerance
+            if triangle_side == "right":
+                return point["x"] >= combined_box["x"] + combined_box["width"] - tip_tolerance
+            if triangle_side == "top":
+                return point["y"] <= combined_box["y"] + tip_tolerance
+            if triangle_side == "bottom":
+                return point["y"] >= combined_box["y"] + combined_box["height"] - tip_tolerance
+            return False
+
+        for _ in range(4):
+            added = False
+            for path in paths:
+                path_id = int(path.get("id") or 0)
+                points = path.get("points") or []
+                if (
+                    path_id in marker_ids
+                    or str(path.get("name") or "").upper() != "LINE"
+                    or path.get("closed")
+                    or len(points) != 2
                 ):
-                    reaches_foreign_triangle = True
-                    break
-            if reaches_foreign_triangle:
-                continue
-            marker_parts.append(path)
-            marker_ids.add(path_id)
-            lead_box = _union_boxes(lead_box, _path_box(path))
-            added = True
-        if not added:
-            break
+                    continue
+                start = {"x": float(points[0].get("x") or 0), "y": float(points[0].get("y") or 0)}
+                end = {"x": float(points[1].get("x") or 0), "y": float(points[1].get("y") or 0)}
+                length = math.hypot(end["x"] - start["x"], end["y"] - start["y"])
+                if length > max_lead_length:
+                    continue
+                is_horizontal = abs(end["y"] - start["y"]) <= lead_axis_tolerance
+                is_vertical = abs(end["x"] - start["x"]) <= lead_axis_tolerance
+                if triangle_side in {"left", "right"} and not is_horizontal:
+                    continue
+                if triangle_side in {"top", "bottom"} and not is_vertical:
+                    continue
+                if not _boxes_touch(lead_box, _path_box(path), lead_axis_tolerance):
+                    continue
+                if touches_arrow_tip(start) or touches_arrow_tip(end):
+                    continue
+                # Do not walk from this callout into the next marker through a
+                # shared horizontal/vertical CAD line.
+                reaches_foreign_triangle = False
+                for other in paths:
+                    other_id = int(other.get("id") or 0)
+                    if other_id in marker_ids or not other.get("closed") or _triangle_side_from_path(other) is None:
+                        continue
+                    other_box = _path_box(other)
+                    if any(
+                        other_box["x"] - lead_axis_tolerance <= point["x"] <= other_box["x"] + other_box["width"] + lead_axis_tolerance
+                        and other_box["y"] - lead_axis_tolerance <= point["y"] <= other_box["y"] + other_box["height"] + lead_axis_tolerance
+                        for point in (start, end)
+                    ):
+                        reaches_foreign_triangle = True
+                        break
+                if reaches_foreign_triangle:
+                    continue
+                marker_parts.append(path)
+                marker_ids.add(path_id)
+                lead_box = _union_boxes(lead_box, _path_box(path))
+                added = True
+            if not added:
+                break
 
     center_x = combined_box["x"] + combined_box["width"] / 2
     center_y = combined_box["y"] + combined_box["height"] / 2
