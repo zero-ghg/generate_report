@@ -622,43 +622,14 @@ def _browser_font_family(cad_font):
     return "SimSun"
 
 
-def _is_single_line_cad_identifier(value):
-    """Equipment / marker tags must stay on one line even in a tight MTEXT box.
-
-    Examples: ``SC1``, ``025``, ``S3-S5``, ``AT-110``, ``AT-110 1``.
-    """
-    raw = str(value or "").strip()
-    if not raw or "\n" in raw:
-        return False
-    compact = re.sub(r"\s+", "", raw)
-    return bool(
-        re.fullmatch(
-            r"(?:[A-Za-z]{1,8}[-_]?)?\d{1,4}(?:[-~](?:[A-Za-z]{0,8}[-_]?)?\d{1,4})*",
-            compact,
-        )
-    )
-
-
-def _is_equipment_nameplate_label(value):
-    """True only for in-box equipment codes such as ``AT-110`` / ``AT-110 1``.
-
-    Deliberately excludes connector labels (``SC2``), bank ranges (``S3-S5``),
-    short markers (``S03`` / ``025``) and Chinese captions — those must keep
-    their CAD insert seats.
-    """
-    compact = re.sub(r"\s+", "", str(value or "").strip()).upper()
-    return bool(re.fullmatch(r"[A-Z]{2,8}-\d{2,5}", compact))
-
-
 def _wrapped_cad_text(item):
     """按 MTEXT 的排版宽度补充显式换行，避免长文字越过标题栏单元格。"""
     text = str(item.get("text") or "")
-    if _is_single_line_cad_identifier(text):
-        # Short CAD identifiers such as SC1/SC2, AT-110 1 and zero-padded
-        # test-point numbers such as 025 are single labels even when their
-        # MTEXT width is narrowly fitted around the glyphs.  Treating the
-        # width as a prose wrapping box incorrectly stacks the final digit
-        # (or the equipment suffix) onto a second, visually smaller line.
+    if "\n" not in text and re.fullmatch(r"(?:[A-Za-z]{1,8})?\d{1,4}", text.strip()):
+        # Short CAD identifiers such as SC1/SC2 and zero-padded test-point
+        # numbers such as 025 are single labels even when their MTEXT width is
+        # narrowly fitted around the glyphs.  Treating the width as a prose
+        # wrapping box incorrectly stacks the final digit.
         return text
     box_width = float(item.get("cadBoxWidth") or 0)
     char_width = float(item.get("fontSize") or 0) * float(item.get("widthFactor") or 1)
@@ -1139,12 +1110,13 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
                 "x": target["x"],
                 "y": target["y"],
                 "binding": existing_binding or target_binding,
+                "cadSourceVisible": bool(target.get("cadSourceVisible")),
+                "labelX": target.get("labelX"),
+                "labelY": target.get("labelY"),
                 "id": row_id,
                 "reportFields": fields,
                 "reportType": report_type,
             }
-            if target.get("sourceTrianglePoints"):
-                point["sourceTrianglePoints"] = copy.deepcopy(target["sourceTrianglePoints"])
             if point["binding"] is None:
                 point.pop("binding")
             test_points.append(point)
@@ -1156,7 +1128,7 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
             target = _marker_target_from_text(text, parsed["paths"])
             point_id = next_id
             next_id += 1
-            point = {
+            test_points.append({
                 "label": label,
                 "imported": True,
                 "side": target.get("side") or "right",
@@ -1169,10 +1141,7 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
                 "id": point_id,
                 "reportFields": {},
                 "reportType": "",
-            }
-            if target.get("sourceTrianglePoints"):
-                point["sourceTrianglePoints"] = copy.deepcopy(target["sourceTrianglePoints"])
-            test_points.append(point)
+            })
 
     # A CAD annotation such as D100-D101 or D100-101 denotes one physical
     # symbol serving a contiguous run of report markers.  Keep that symbol as
@@ -1194,9 +1163,12 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
 
 
 def _parse_marker_range(value):
-    """Return every marker in a compact CAD range, e.g. D1-30 or D1-D30."""
+    """Return every marker in a compact CAD range, e.g. D1-30 or SC1-SC3."""
     compact = re.sub(r"\s+", "", str(value or "")).upper()
-    match = re.fullmatch(r"([A-Z]?)(\d+)(?:-|－|—|~|～|至)([A-Z]?)(\d+)", compact)
+    # Prefixes are not limited to one character: SPD drawings commonly use
+    # ``SC1-SC5`` alongside the ordinary ``S1-S5`` range.  Treat the full
+    # prefix as semantic so both groups remain independent test points.
+    match = re.fullmatch(r"([A-Z]*)(\d+)(?:-|－|—|~|～|至)([A-Z]*)(\d+)", compact)
     if not match:
         return None
     start_prefix, start_text, end_prefix, end_text = match.groups()
@@ -1759,12 +1731,12 @@ def _select_marker_target(candidates, row, paths, texts):
 
 
 def _marker_is_in_text_range(marker, text_value):
-    """Match one report marker against a CAD range label such as D55~D56."""
-    marker_match = re.fullmatch(r"([A-Z]?)(\d+)", marker)
+    """Match one report marker against a CAD range label such as SC3~SC5."""
+    marker_match = re.fullmatch(r"([A-Z]*)(\d+)", marker)
     # DXF text is often split onto separate lines.  Once whitespace is
     # removed, a visible range such as ``D1\n-D\n12`` becomes ``D1-D12``.
     # Treat its hyphen as the range separator as well as the CAD tilde forms.
-    range_match = re.fullmatch(r"([A-Z]?)(\d+)(?:~|～|-)([A-Z]?)(\d+)", text_value)
+    range_match = re.fullmatch(r"([A-Z]*)(\d+)(?:~|～|-)([A-Z]*)(\d+)", text_value)
     if not marker_match or not range_match:
         return False
     marker_prefix, marker_number = marker_match.group(1), int(marker_match.group(2))
@@ -1777,15 +1749,13 @@ def _marker_is_in_text_range(marker, text_value):
     )
 
 
-def _triangle_geometry_from_path(path):
-    """Return tip, side and vertices for a small filled triangular CAD marker.
+def _triangle_side_from_path(path):
+    """Return the visual direction of a small filled triangular CAD marker.
 
     Text is normally placed beside a test-point arrow, but that relationship
     is only a fallback: legends can deliberately place the label on either
     side of the arrow.  For an actual solid triangle the geometry gives us an
     unambiguous direction, including the left-facing sample in the legend.
-    The tip (not the bounding-box centre) is the stable anchor used by the
-    frontend when redrawing the arrow and its number.
     """
     raw_points = path.get("points") or []
     if len(raw_points) < 3:
@@ -1801,6 +1771,31 @@ def _triangle_geometry_from_path(path):
             vertices.append(vertex)
     if len(vertices) > 1 and math.hypot(vertices[0][0] - vertices[-1][0], vertices[0][1] - vertices[-1][1]) <= merge_distance:
         vertices.pop()
+    # HATCH boundaries frequently retain an extra point in the middle of a
+    # triangle's straight base (A → base-centre → B).  It is still a normal
+    # solid arrow, but without removing that collinear point it looks like a
+    # four-sided polygon and is skipped by the marker matcher.
+    collinear_tolerance = max(extent * 1e-4, 1e-6)
+    changed = True
+    while changed and len(vertices) > 3:
+        changed = False
+        for index, current in enumerate(vertices):
+            previous = vertices[(index - 1) % len(vertices)]
+            following = vertices[(index + 1) % len(vertices)]
+            first_length = math.hypot(current[0] - previous[0], current[1] - previous[1])
+            second_length = math.hypot(following[0] - current[0], following[1] - current[1])
+            if first_length <= collinear_tolerance or second_length <= collinear_tolerance:
+                vertices.pop(index)
+                changed = True
+                break
+            cross = abs(
+                (current[0] - previous[0]) * (following[1] - current[1])
+                - (current[1] - previous[1]) * (following[0] - current[0])
+            )
+            if cross <= collinear_tolerance * (first_length + second_length):
+                vertices.pop(index)
+                changed = True
+                break
     if len(vertices) != 3:
         return None
 
@@ -1813,151 +1808,39 @@ def _triangle_geometry_from_path(path):
     extreme_tolerance = extent * 0.05
     left_count = sum(abs(value - min(vertex_xs)) <= extreme_tolerance for value in vertex_xs)
     right_count = sum(abs(value - max(vertex_xs)) <= extreme_tolerance for value in vertex_xs)
-    tip_index = None
-    side = None
     if left_count == 1 and right_count >= 2:
-        side = "left"
-        tip_index = min(range(3), key=lambda index: vertices[index][0])
-    elif right_count == 1 and left_count >= 2:
-        side = "right"
-        tip_index = max(range(3), key=lambda index: vertices[index][0])
-    else:
-        top_count = sum(abs(value - min(vertex_ys)) <= extreme_tolerance for value in vertex_ys)
-        bottom_count = sum(abs(value - max(vertex_ys)) <= extreme_tolerance for value in vertex_ys)
-        if top_count == 1 and bottom_count >= 2:
-            side = "top"
-            tip_index = min(range(3), key=lambda index: vertices[index][1])
-        elif bottom_count == 1 and top_count >= 2:
-            side = "bottom"
-            tip_index = max(range(3), key=lambda index: vertices[index][1])
+        return "left"
+    if right_count == 1 and left_count >= 2:
+        return "right"
+    top_count = sum(abs(value - min(vertex_ys)) <= extreme_tolerance for value in vertex_ys)
+    bottom_count = sum(abs(value - max(vertex_ys)) <= extreme_tolerance for value in vertex_ys)
+    if top_count == 1 and bottom_count >= 2:
+        return "top"
+    if bottom_count == 1 and top_count >= 2:
+        return "bottom"
 
-    if tip_index is None:
-        tip_index = max(
-            range(3),
-            key=lambda index: math.hypot(
-                vertices[index][0] - (vertices[(index + 1) % 3][0] + vertices[(index + 2) % 3][0]) / 2,
-                vertices[index][1] - (vertices[(index + 1) % 3][1] + vertices[(index + 2) % 3][1]) / 2,
-            ),
-        )
-        tip_x, tip_y = vertices[tip_index]
-        base = [vertices[index] for index in range(3) if index != tip_index]
-        base_x = (base[0][0] + base[1][0]) / 2
-        base_y = (base[0][1] + base[1][1]) / 2
-        delta_x = tip_x - base_x
-        delta_y = tip_y - base_y
-        if abs(delta_x) >= abs(delta_y):
-            side = "right" if delta_x > 0 else "left"
-        else:
-            side = "bottom" if delta_y > 0 else "top"
+    tip_index = max(
+        range(3),
+        key=lambda index: math.hypot(
+            vertices[index][0] - (vertices[(index + 1) % 3][0] + vertices[(index + 2) % 3][0]) / 2,
+            vertices[index][1] - (vertices[(index + 1) % 3][1] + vertices[(index + 2) % 3][1]) / 2,
+        ),
+    )
     tip_x, tip_y = vertices[tip_index]
-    return {
-        "points": [{"x": vertex[0], "y": vertex[1]} for vertex in vertices],
-        "side": side,
-        "x": tip_x,
-        "y": tip_y,
-    }
-
-
-def _triangle_side_from_path(path):
-    geometry = _triangle_geometry_from_path(path)
-    return None if geometry is None else geometry["side"]
-
-
-def _triangle_hull_points(parts):
-    points = [point for part in parts for point in part.get("points") or []]
-    if len(points) < 3:
-        return None
-    xs = [float(point.get("x") or 0) for point in points]
-    ys = [float(point.get("y") or 0) for point in points]
-    tolerance = max(max(max(xs) - min(xs), max(ys) - min(ys)) * 0.03, 1e-6)
-    merged = []
-    for point in points:
-        x = float(point.get("x") or 0)
-        y = float(point.get("y") or 0)
-        match = next(
-            (
-                existing
-                for existing in merged
-                if math.hypot(x - existing["x"], y - existing["y"]) <= tolerance
-            ),
-            None,
-        )
-        if match is None:
-            merged.append({"x": x, "y": y, "count": 1})
-        else:
-            count = int(match["count"])
-            match["x"] = (match["x"] * count + x) / (count + 1)
-            match["y"] = (match["y"] * count + y) / (count + 1)
-            match["count"] = count + 1
-    hull = _convex_hull(merged)
-    if len(hull) == 3:
-        return hull
-
-    # ODA often splits one filled arrow into upper/lower halves whose tip
-    # coordinates differ by a hair.  The convex hull then has a tiny fourth
-    # corner.  Rebuild a clean left/right silhouette from the combined bounds
-    # so the tip sits on the shared mid-height of the full arrow.
-    sides = {
-        side
-        for part in parts
-        if (side := _triangle_side_from_path(part)) in {"left", "right"}
-    }
-    if len(sides) != 1 or len(parts) < 2:
-        return None
-    left_x, right_x = min(xs), max(xs)
-    top_y, bottom_y = min(ys), max(ys)
-    middle_y = (top_y + bottom_y) / 2
-    side = next(iter(sides))
-    if side == "left":
-        return [
-            {"x": right_x, "y": top_y},
-            {"x": left_x, "y": middle_y},
-            {"x": right_x, "y": bottom_y},
-        ]
-    return [
-        {"x": left_x, "y": top_y},
-        {"x": right_x, "y": middle_y},
-        {"x": left_x, "y": bottom_y},
-    ]
-
-
-def _triangle_geometry_from_parts(parts):
-    """Resolve tip/side after joining ODA-exported hatch halves of one arrow."""
-    hull = _triangle_hull_points(parts)
-    if hull is None:
-        return None
-    return _triangle_geometry_from_path({"points": hull})
-
-
-def _triangle_side_from_parts(parts):
-    """Resolve a CAD arrow direction after joining its exported hatch halves.
-
-    ODA commonly expands one filled triangle into two adjacent HATCH paths.
-    Each half is itself a small left/right triangle, so inspecting the first
-    half reports the wrong direction for vertical arrows.  The convex hull of
-    all touching halves restores the original three-point silhouette.
-    """
-    geometry = _triangle_geometry_from_parts(parts)
-    return None if geometry is None else geometry["side"]
-
-
-def _is_connector_identifier_label(value):
-    """SC1/SC2-style names label a connector box; they are not tip callouts."""
-    compact = re.sub(r"\s+", "", str(value or "")).upper()
-    return bool(re.fullmatch(r"SC\d{1,3}", compact))
+    base = [vertices[index] for index in range(3) if index != tip_index]
+    base_x = (base[0][0] + base[1][0]) / 2
+    base_y = (base[0][1] + base[1][1]) / 2
+    delta_x = tip_x - base_x
+    delta_y = tip_y - base_y
+    if abs(delta_x) >= abs(delta_y):
+        return "right" if delta_x > 0 else "left"
+    return "bottom" if delta_y > 0 else "top"
 
 
 def _marker_target_from_text(text, paths):
     """将编号文字吸附到附近的小型填充标记；找不到时保留文字坐标。"""
     text_x = float(text.get("x") or 0)
     text_y = float(text.get("y") or 0)
-    # Connector identifiers (SC1/SC2) sit above their equipment box.  Snapping
-    # them onto a nearby filled triangle invents a free arrow that the DWG
-    # never drew beside the label.
-    if _is_connector_identifier_label(text.get("text") or text.get("name")):
-        target = _item_target(text, "text")
-        target["markerLabel"] = _compact_marker_text(text.get("text"))
-        return target
     # Range labels (D100-D101) are often printed to the left of a vertical
     # equipment bank, so their original CAD arrow is farther away than a
     # regular single-point label.  A single label can also sit just outside a
@@ -2004,7 +1887,7 @@ def _marker_target_from_text(text, paths):
     # outs are very close.  Prefer the candidate aligned with the label on
     # either axis (the usual marker/label relationship) before using distance
     # as the final tie-breaker.
-    _, _, _, marker, marker_box = min(
+    selected_distance, _, _, marker, marker_box = min(
         candidates,
         key=lambda item: (
             item[0] + min(abs(item[1] - text_x), abs(item[2] - text_y)) * 0.75,
@@ -2050,6 +1933,118 @@ def _marker_target_from_text(text, paths):
             marker_ids.add(path_id)
             combined_box = _union_boxes(combined_box, path_box)
 
+    triangle_side = next(
+        (resolved for part in marker_parts if (resolved := _triangle_side_from_path(part))),
+        None,
+    )
+
+    # A nearby triangle is a complete test-point marker by itself.  Only when
+    # the label has to fall back to a more distant arrow do we need to recover
+    # an optional CAD callout handle.  Keeping the two cases separate prevents
+    # normal pipeline segments that happen to meet an arrow tip from becoming
+    # part of the test point (for example the S2 callout).
+    # Around 18 drawing units still represents a label seated immediately
+    # beside its triangle.  Larger gaps are CAD callouts (such as SC2 above a
+    # connector) and need the fallback handle recovery below.
+    direct_marker_distance = min(marker_distance_limit, 18.0)
+    uses_fallback_marker = selected_distance > direct_marker_distance
+
+    # CAD arrowheads are often encoded as a filled HATCH plus four short
+    # outline segments.  The HATCH is enough to recognise the marker, but the
+    # outline segments must share its interaction group as well; otherwise a
+    # dragged test point leaves a ghost arrow behind.  Keep only line segments
+    # wholly contained by the arrow's box, never the adjacent pipeline line.
+    arrow_box_tolerance = max(min(combined_box["width"], combined_box["height"]) * 0.12, 0.5)
+    for path in paths:
+        path_id = int(path.get("id") or 0)
+        points = path.get("points") or []
+        if (
+            path_id in marker_ids
+            or str(path.get("name") or "").upper() not in {"LINE", "LWPOLYLINE"}
+            or path.get("closed")
+            or len(points) < 2
+        ):
+            continue
+        if all(
+            combined_box["x"] - arrow_box_tolerance <= float(point.get("x") or 0) <= combined_box["x"] + combined_box["width"] + arrow_box_tolerance
+            and combined_box["y"] - arrow_box_tolerance <= float(point.get("y") or 0) <= combined_box["y"] + combined_box["height"] + arrow_box_tolerance
+            for point in points
+        ):
+            marker_parts.append(path)
+            marker_ids.add(path_id)
+
+    # A fallback detection callout can be drawn as “handle + triangular
+    # arrow”.  Retain only the short collinear handle attached to the *tail*
+    # of the selected triangle.  A line attached to its tip is part of the
+    # process pipeline, not the test point, and must never be absorbed.
+    if uses_fallback_marker:
+        lead_box = dict(combined_box)
+        lead_axis_tolerance = max(min(lead_box["width"], lead_box["height"]) * 0.55, 1.0)
+        max_lead_length = max(48.0, max(lead_box["width"], lead_box["height"]) * 8)
+        tip_tolerance = max(lead_axis_tolerance, min(combined_box["width"], combined_box["height"]) * 0.18)
+
+        def touches_arrow_tip(point):
+            if triangle_side == "left":
+                return point["x"] <= combined_box["x"] + tip_tolerance
+            if triangle_side == "right":
+                return point["x"] >= combined_box["x"] + combined_box["width"] - tip_tolerance
+            if triangle_side == "top":
+                return point["y"] <= combined_box["y"] + tip_tolerance
+            if triangle_side == "bottom":
+                return point["y"] >= combined_box["y"] + combined_box["height"] - tip_tolerance
+            return False
+
+        for _ in range(4):
+            added = False
+            for path in paths:
+                path_id = int(path.get("id") or 0)
+                points = path.get("points") or []
+                if (
+                    path_id in marker_ids
+                    or str(path.get("name") or "").upper() != "LINE"
+                    or path.get("closed")
+                    or len(points) != 2
+                ):
+                    continue
+                start = {"x": float(points[0].get("x") or 0), "y": float(points[0].get("y") or 0)}
+                end = {"x": float(points[1].get("x") or 0), "y": float(points[1].get("y") or 0)}
+                length = math.hypot(end["x"] - start["x"], end["y"] - start["y"])
+                if length > max_lead_length:
+                    continue
+                is_horizontal = abs(end["y"] - start["y"]) <= lead_axis_tolerance
+                is_vertical = abs(end["x"] - start["x"]) <= lead_axis_tolerance
+                if triangle_side in {"left", "right"} and not is_horizontal:
+                    continue
+                if triangle_side in {"top", "bottom"} and not is_vertical:
+                    continue
+                if not _boxes_touch(lead_box, _path_box(path), lead_axis_tolerance):
+                    continue
+                if touches_arrow_tip(start) or touches_arrow_tip(end):
+                    continue
+                # Do not walk from this callout into the next marker through a
+                # shared horizontal/vertical CAD line.
+                reaches_foreign_triangle = False
+                for other in paths:
+                    other_id = int(other.get("id") or 0)
+                    if other_id in marker_ids or not other.get("closed") or _triangle_side_from_path(other) is None:
+                        continue
+                    other_box = _path_box(other)
+                    if any(
+                        other_box["x"] - lead_axis_tolerance <= point["x"] <= other_box["x"] + other_box["width"] + lead_axis_tolerance
+                        and other_box["y"] - lead_axis_tolerance <= point["y"] <= other_box["y"] + other_box["height"] + lead_axis_tolerance
+                        for point in (start, end)
+                    ):
+                        reaches_foreign_triangle = True
+                        break
+                if reaches_foreign_triangle:
+                    continue
+                marker_parts.append(path)
+                marker_ids.add(path_id)
+                lead_box = _union_boxes(lead_box, _path_box(path))
+                added = True
+            if not added:
+                break
+
     center_x = combined_box["x"] + combined_box["width"] / 2
     center_y = combined_box["y"] + combined_box["height"] / 2
     delta_x = text_x - center_x
@@ -2060,27 +2055,9 @@ def _marker_target_from_text(text, paths):
         side = "bottom" if delta_y < 0 else "top"
     # Prefer the triangle's physical tip.  The relative label position is
     # retained as a fallback for non-triangular markers and composite symbols.
-    geometry = _triangle_geometry_from_parts(marker_parts) or next(
-        (
-            resolved
-            for part in marker_parts
-            if (resolved := _triangle_geometry_from_path(part))
-        ),
-        None,
-    )
-    if geometry:
-        side = geometry["side"]
-        anchor_x = float(geometry["x"])
-        anchor_y = float(geometry["y"])
-        source_triangle_points = list(geometry["points"])
-    else:
-        anchor_x = center_x
-        anchor_y = center_y
-        source_triangle_points = None
-    # Do not push the CAD number away from its arrow.  Existing-report import
-    # hides that number and redraws it from the tip/side, so mutating text.x/y
-    # only makes the overlay label drift (especially for vertical stacks like
-    # 41/42).
+    if triangle_side:
+        side = triangle_side
+    _separate_overlapping_marker_label(text, combined_box, delta_x, delta_y)
     if side in {"top", "bottom"}:
         size = (combined_box["width"] / 18 + combined_box["height"] / 14) / 2
     else:
@@ -2098,10 +2075,10 @@ def _marker_target_from_text(text, paths):
         [int(part.get("id")) for part in marker_parts if part.get("id") is not None]
         + ([int(text.get("id"))] if text.get("id") is not None else [])
     ))
-    target = {
+    return {
         "markerLabel": _compact_marker_text(text.get("text")),
-        "x": anchor_x,
-        "y": anchor_y,
+        "x": center_x,
+        "y": center_y,
         "sourceElementIds": source_element_ids,
         "sourceHandles": handles,
         "id": text.get("id"),
@@ -2109,9 +2086,6 @@ def _marker_target_from_text(text, paths):
         "side": side,
         "size": size,
     }
-    if source_triangle_points:
-        target["sourceTrianglePoints"] = source_triangle_points
-    return target
 
 
 def _marker_text_visual_box(text):
@@ -2288,7 +2262,7 @@ def _normalize_marker(value):
     ``_marker_is_in_text_range``.
     """
     compact = _compact_marker_text(value)
-    match = re.fullmatch(r"([A-Z]?)(\d+)", compact)
+    match = re.fullmatch(r"([A-Z]*)(\d+)", compact)
     if not match:
         return compact
     prefix, number = match.groups()
@@ -2321,7 +2295,9 @@ def finalize_existing_report_workspace(workspace, image_data_url=None, image_fil
             if str(item.get("interactionGroupId") or "") in marker_group_ids:
                 item["testPointSource"] = True
     for point in test_points:
-        point["cadSourceVisible"] = bool(point.get("interactionGroupId"))
+        point["cadSourceVisible"] = bool(
+            point.get("cadSourceVisible") or point.get("interactionGroupId")
+        )
         source_marker = _compact_marker_text(point.get("sourceMarker"))
         display_marker = _compact_marker_text(point.get("label"))
         if not source_marker or source_marker == display_marker:
@@ -2356,7 +2332,6 @@ def finalize_existing_report_workspace(workspace, image_data_url=None, image_fil
     paths = _remove_title_block_fill_artifacts(paths, chrome_regions["titleBlock"])
     _normalize_north_labels(texts, paths, width, height)
     _fit_cad_text_to_enclosing_boxes(texts, paths)
-    _fit_compact_identifier_texts_to_enclosing_boxes(texts, paths)
     _separate_connector_identifier_labels(texts, paths)
     _anchor_room_labels_to_enclosing_boxes(texts, paths)
     readonly_regions = {
@@ -3184,82 +3159,6 @@ def _fit_cad_text_to_enclosing_boxes(texts, paths):
         item["fontSize"] = max(float(item.get("fontSize") or 0) * scale, 4)
         item["width"] = fitted_width
         item["height"] = fitted_height
-
-
-def _fit_compact_identifier_texts_to_enclosing_boxes(texts, paths):
-    """Center equipment tags such as AT-1101 inside their nameplate boxes.
-
-    Keeping these labels on one line avoids a stacked digit, but the CAD insert
-    point is often the MTEXT top-left corner.  Without the recorded glyph
-    outlines the browser text then looks tiny and top-left aligned.  Match the
-    AutoCAD nameplate look by sizing the tag to the enclosing rectangle and
-    anchoring it at the box centre.
-    """
-    rectangles = []
-    for path in paths:
-        if not path.get("closed"):
-            continue
-        box = _path_box(path)
-        if 8 <= box["width"] <= 220 and 8 <= box["height"] <= 110:
-            rectangles.append(box)
-    if not rectangles:
-        return
-
-    for item in texts:
-        label = str(item.get("text") or item.get("name") or "").strip()
-        # Only in-box equipment codes (AT-110 / AT-1101).  Do not recenter
-        # connector labels, bank ranges or short markers onto nearby boxes.
-        if not _is_equipment_nameplate_label(label):
-            continue
-        if abs(float(item.get("rotation") or 0) % 180) > 0.01:
-            continue
-
-        bounds = item.get("glyphBounds") or {}
-        glyph_width = float(bounds.get("width") or 0)
-        glyph_height = float(bounds.get("height") or 0)
-        if glyph_width > 0 and glyph_height > 0:
-            center_x = float(item.get("x") or 0) + float(bounds.get("x") or 0) + glyph_width / 2
-            center_y = float(item.get("y") or 0) + float(bounds.get("y") or 0) + glyph_height / 2
-        else:
-            text_box = _item_box(item)
-            center_x = text_box["x"] + text_box["width"] / 2
-            center_y = text_box["y"] + text_box["height"] / 2
-
-        candidates = [
-            box for box in rectangles
-            if box["x"] - 2 <= center_x <= box["x"] + box["width"] + 2
-            and box["y"] - 2 <= center_y <= box["y"] + box["height"] + 2
-        ]
-        if not candidates:
-            continue
-        target = min(candidates, key=lambda box: box["width"] * box["height"])
-        width_factor = max(abs(float(item.get("widthFactor") or 1)), 0.01)
-        target_width = target["width"] * 0.9
-        target_height = target["height"] * 0.78
-        font_by_height = target_height
-        # Condensed CAD nameplate tags are narrower than a full em square.
-        font_by_width = target_width / max(len(label) * 0.5 * width_factor, 0.01)
-        font_size = max(min(font_by_height, font_by_width), 4)
-
-        # Prefer the CAD glyph silhouette when it already fills the nameplate.
-        if (
-            item.get("glyphPaths")
-            and glyph_width >= target_width * 0.82
-            and glyph_height >= target_height * 0.82
-        ):
-            continue
-
-        item["fontSize"] = font_size
-        item["width"] = target_width
-        item["height"] = target_height
-        item["textAnchor"] = "middle"
-        item["dominantBaseline"] = "central"
-        item["x"] = target["x"] + target["width"] / 2
-        item["y"] = target["y"] + target["height"] / 2
-        item["cadRender"] = True
-        item.pop("glyphPaths", None)
-        item.pop("glyphBounds", None)
-        item.pop("glyphFillRule", None)
 
 
 def _separate_connector_identifier_labels(texts, paths):
