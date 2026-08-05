@@ -87,19 +87,35 @@ WSGI_APPLICATION = 'generate_report.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/3.1/ref/settings/#databases
 
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "django.db.backends.mysql",
+#         "NAME": "generate_report",
+#         "USER": "root",
+#         "PASSWORD": "dlkj2023..",
+#         "HOST": "49.232.57.207",
+#         "PORT": "30003",
+#         "OPTIONS": {
+#             "charset": "utf8mb4",
+#         },
+#     }
+# }
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.mysql",
         "NAME": "generate_report",
         "USER": "root",
-        "PASSWORD": "dlkj2023..",
-        "HOST": "49.232.57.207",
-        "PORT": "30003",
+        "PASSWORD": "123456",
+        "HOST": "localhost",
+        "PORT": "3306",
         "OPTIONS": {
             "charset": "utf8mb4",
         },
     }
 }
+
+
 
 # Password validation
 # https://docs.djangoproject.com/en/3.1/ref/settings/#auth-password-validators

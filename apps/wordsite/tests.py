@@ -145,6 +145,35 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         self.assertEqual(target["y"], 80)
         self.assertNotIn("sourceTrianglePoints", target)
         self.assertEqual(target["sourceElementIds"], [10])
+
+    def test_connector_range_identifier_does_not_snap_onto_nearby_triangle(self):
+        text = {
+            "id": 11,
+            "text": "SC3-SC5",
+            "x": 100,
+            "y": 60,
+            "width": 40,
+            "height": 12,
+            "importedSourceHandles": ["TEXT"],
+        }
+        paths = [
+            {
+                "id": 1,
+                "name": "HATCH",
+                "closed": True,
+                "importedSourceHandles": ["ARROW"],
+                "points": [{"x": 118, "y": 76}, {"x": 130, "y": 80}, {"x": 118, "y": 84}],
+            },
+        ]
+
+        target = _marker_target_from_text(text, paths)
+
+        self.assertEqual(target["markerLabel"], "SC3-SC5")
+        self.assertEqual(target["x"], 100)
+        self.assertEqual(target["y"], 60)
+        self.assertNotIn("sourceTrianglePoints", target)
+        self.assertEqual(target["sourceElementIds"], [11])
+
     def test_exports_each_child_drawing_as_a_separate_legend_canvas(self):
         legend = {
             "boardHeight": 600,
@@ -401,15 +430,58 @@ class DwgWorkspaceParserTests(SimpleTestCase):
             {"x": 3.2, "y": 5},
             {"x": 0, "y": 5},
         ]]
+        # A real glyph outline has interior detail, not a single empty rectangle.
         complete_label = [[
             {"x": 0, "y": 0},
+            {"x": 4, "y": 0},
+            {"x": 5, "y": 1},
+            {"x": 5, "y": 4},
+            {"x": 4, "y": 5},
+            {"x": 1, "y": 5},
+            {"x": 0, "y": 4},
+            {"x": 0, "y": 1},
+            {"x": 1, "y": 0.5},
+            {"x": 2, "y": 2},
+            {"x": 3, "y": 0.5},
+        ], [
+            {"x": 6, "y": 0},
+            {"x": 10, "y": 0},
+            {"x": 11, "y": 1},
+            {"x": 11, "y": 4},
+            {"x": 10, "y": 5},
+            {"x": 7, "y": 5},
+            {"x": 6, "y": 4},
+            {"x": 6, "y": 1},
+            {"x": 8, "y": 2.5},
+            {"x": 9, "y": 1.5},
+        ], [
+            {"x": 12, "y": 0},
             {"x": 15, "y": 0},
             {"x": 15, "y": 5},
-            {"x": 0, "y": 5},
+            {"x": 12, "y": 5},
+            {"x": 12.5, "y": 4},
+            {"x": 14, "y": 2.5},
+            {"x": 12.5, "y": 1},
         ]]
 
         self.assertFalse(_cad_glyph_outlines_complete(item, only_letter_c))
         self.assertTrue(_cad_glyph_outlines_complete(item, complete_label))
+
+    def test_rejects_shx_missing_glyph_tofu_boxes_for_chinese(self):
+        item = {
+            "cadFont": "simplex.shx",
+            "fontFamily": "Arial",
+            "fontSize": 8,
+            "text": "电池柜",
+            "widthFactor": 1,
+        }
+        tofu_boxes = [
+            [{"x": 0, "y": 0}, {"x": 6, "y": 0}, {"x": 6, "y": 8}, {"x": 0, "y": 8}],
+            [{"x": 7, "y": 0}, {"x": 13, "y": 0}, {"x": 13, "y": 8}, {"x": 7, "y": 8}],
+            [{"x": 14, "y": 0}, {"x": 20, "y": 0}, {"x": 20, "y": 8}, {"x": 14, "y": 8}],
+        ]
+
+        self.assertFalse(_cad_glyph_outlines_complete(item, tofu_boxes))
 
     def test_pads_measurement_rows_to_full_page_capacity(self):
         document = Document()

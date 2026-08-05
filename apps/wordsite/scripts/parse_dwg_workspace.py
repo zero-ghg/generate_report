@@ -622,14 +622,43 @@ def _browser_font_family(cad_font):
     return "SimSun"
 
 
+def _is_single_line_cad_identifier(value):
+    """Equipment / marker tags must stay on one line even in a tight MTEXT box.
+
+    Examples: ``SC1``, ``025``, ``S3-S5``, ``AT-110``, ``AT-110 1``.
+    """
+    raw = str(value or "").strip()
+    if not raw or "\n" in raw:
+        return False
+    compact = re.sub(r"\s+", "", raw)
+    return bool(
+        re.fullmatch(
+            r"(?:[A-Za-z]{1,8}[-_]?)?\d{1,4}(?:[-~](?:[A-Za-z]{0,8}[-_]?)?\d{1,4})*",
+            compact,
+        )
+    )
+
+
+def _is_equipment_nameplate_label(value):
+    """True only for in-box equipment codes such as ``AT-110`` / ``AT-110 1``.
+
+    Deliberately excludes connector labels (``SC2``), bank ranges (``S3-S5``),
+    short markers (``S03`` / ``025``) and Chinese captions — those must keep
+    their CAD insert seats.
+    """
+    compact = re.sub(r"\s+", "", str(value or "").strip()).upper()
+    return bool(re.fullmatch(r"[A-Z]{2,8}-\d{2,5}", compact))
+
+
 def _wrapped_cad_text(item):
     """按 MTEXT 的排版宽度补充显式换行，避免长文字越过标题栏单元格。"""
     text = str(item.get("text") or "")
-    if "\n" not in text and re.fullmatch(r"(?:[A-Za-z]{1,8})?\d{1,4}", text.strip()):
-        # Short CAD identifiers such as SC1/SC2 and zero-padded test-point
-        # numbers such as 025 are single labels even when their MTEXT width is
-        # narrowly fitted around the glyphs.  Treating the width as a prose
-        # wrapping box incorrectly stacks the final digit.
+    if _is_single_line_cad_identifier(text):
+        # Short CAD identifiers such as SC1/SC2, AT-110 1 and zero-padded
+        # test-point numbers such as 025 are single labels even when their
+        # MTEXT width is narrowly fitted around the glyphs.  Treating the
+        # width as a prose wrapping box incorrectly stacks the final digit
+        # (or the equipment suffix) onto a second, visually smaller line.
         return text
     box_width = float(item.get("cadBoxWidth") or 0)
     char_width = float(item.get("fontSize") or 0) * float(item.get("widthFactor") or 1)
@@ -657,6 +686,40 @@ def _wrapped_cad_text(item):
     return "\n".join(lines)
 
 
+def _outline_is_axis_aligned_box(outline, tolerance_ratio=0.08):
+    """True when an outline is essentially an empty rectangle (SHX missing glyph)."""
+    if not outline or len(outline) < 3 or len(outline) > 8:
+        return False
+    xs = [float(point.get("x") or 0) for point in outline]
+    ys = [float(point.get("y") or 0) for point in outline]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    width = max_x - min_x
+    height = max_y - min_y
+    if width <= 1e-6 or height <= 1e-6:
+        return False
+    # Missing-glyph tofu is roughly character-sized, not a long stroke.
+    aspect = max(width, height) / min(width, height)
+    if aspect > 6.5:
+        return False
+    tolerance = max(width, height) * tolerance_ratio
+    on_edge = sum(
+        1
+        for x, y in zip(xs, ys)
+        if (
+            abs(x - min_x) <= tolerance
+            or abs(x - max_x) <= tolerance
+            or abs(y - min_y) <= tolerance
+            or abs(y - max_y) <= tolerance
+        )
+    )
+    return on_edge >= len(xs) * 0.85
+
+
+def _text_cjk_count(value):
+    return sum(1 for char in str(value or "") if "\u4e00" <= char <= "\u9fff")
+
+
 def _cad_glyph_outlines_complete(item, outlines):
     """Reject recorder output that contains only a fragment of the text."""
     points = [point for outline in outlines for point in outline]
@@ -669,7 +732,20 @@ def _cad_glyph_outlines_complete(item, outlines):
     font_size = max(float(item.get("fontSize") or 0), 0.01)
     width_factor = max(abs(float(item.get("widthFactor") or 1)), 0.01)
     nominal_width = longest_line * font_size * width_factor
-    return outline_width >= nominal_width * 0.4 and outline_height >= font_size * 0.25
+    if outline_width < nominal_width * 0.4 or outline_height < font_size * 0.25:
+        return False
+
+    # SHX big-font failures still produce one empty rectangle per CJK glyph.
+    # Those boxes pass the width/height check above, so detect them explicitly
+    # and fall back to browser text for the real Unicode string.
+    cjk_count = _text_cjk_count(text)
+    if cjk_count > 0:
+        box_like = sum(1 for outline in outlines if _outline_is_axis_aligned_box(outline))
+        if box_like >= max(cjk_count * 0.6, 1) or (
+            box_like >= 2 and box_like >= len(outlines) * 0.5
+        ):
+            return False
+    return True
 
 
 def _normalize_hatch_pattern_spacing(paths):
@@ -1749,13 +1825,15 @@ def _marker_is_in_text_range(marker, text_value):
     )
 
 
-def _triangle_side_from_path(path):
-    """Return the visual direction of a small filled triangular CAD marker.
+def _triangle_geometry_from_path(path):
+    """Return tip, side and vertices for a small filled triangular CAD marker.
 
     Text is normally placed beside a test-point arrow, but that relationship
     is only a fallback: legends can deliberately place the label on either
     side of the arrow.  For an actual solid triangle the geometry gives us an
     unambiguous direction, including the left-facing sample in the legend.
+    The tip (not the bounding-box centre) is the stable anchor used by the
+    frontend when redrawing the arrow and its number.
     """
     raw_points = path.get("points") or []
     if len(raw_points) < 3:
@@ -1808,39 +1886,154 @@ def _triangle_side_from_path(path):
     extreme_tolerance = extent * 0.05
     left_count = sum(abs(value - min(vertex_xs)) <= extreme_tolerance for value in vertex_xs)
     right_count = sum(abs(value - max(vertex_xs)) <= extreme_tolerance for value in vertex_xs)
+    tip_index = None
+    side = None
     if left_count == 1 and right_count >= 2:
-        return "left"
-    if right_count == 1 and left_count >= 2:
-        return "right"
-    top_count = sum(abs(value - min(vertex_ys)) <= extreme_tolerance for value in vertex_ys)
-    bottom_count = sum(abs(value - max(vertex_ys)) <= extreme_tolerance for value in vertex_ys)
-    if top_count == 1 and bottom_count >= 2:
-        return "top"
-    if bottom_count == 1 and top_count >= 2:
-        return "bottom"
+        side = "left"
+        tip_index = min(range(3), key=lambda index: vertices[index][0])
+    elif right_count == 1 and left_count >= 2:
+        side = "right"
+        tip_index = max(range(3), key=lambda index: vertices[index][0])
+    else:
+        top_count = sum(abs(value - min(vertex_ys)) <= extreme_tolerance for value in vertex_ys)
+        bottom_count = sum(abs(value - max(vertex_ys)) <= extreme_tolerance for value in vertex_ys)
+        if top_count == 1 and bottom_count >= 2:
+            side = "top"
+            tip_index = min(range(3), key=lambda index: vertices[index][1])
+        elif bottom_count == 1 and top_count >= 2:
+            side = "bottom"
+            tip_index = max(range(3), key=lambda index: vertices[index][1])
 
-    tip_index = max(
-        range(3),
-        key=lambda index: math.hypot(
-            vertices[index][0] - (vertices[(index + 1) % 3][0] + vertices[(index + 2) % 3][0]) / 2,
-            vertices[index][1] - (vertices[(index + 1) % 3][1] + vertices[(index + 2) % 3][1]) / 2,
-        ),
-    )
+    if tip_index is None:
+        tip_index = max(
+            range(3),
+            key=lambda index: math.hypot(
+                vertices[index][0] - (vertices[(index + 1) % 3][0] + vertices[(index + 2) % 3][0]) / 2,
+                vertices[index][1] - (vertices[(index + 1) % 3][1] + vertices[(index + 2) % 3][1]) / 2,
+            ),
+        )
+        tip_x, tip_y = vertices[tip_index]
+        base = [vertices[index] for index in range(3) if index != tip_index]
+        base_x = (base[0][0] + base[1][0]) / 2
+        base_y = (base[0][1] + base[1][1]) / 2
+        delta_x = tip_x - base_x
+        delta_y = tip_y - base_y
+        if abs(delta_x) >= abs(delta_y):
+            side = "right" if delta_x > 0 else "left"
+        else:
+            side = "bottom" if delta_y > 0 else "top"
     tip_x, tip_y = vertices[tip_index]
-    base = [vertices[index] for index in range(3) if index != tip_index]
-    base_x = (base[0][0] + base[1][0]) / 2
-    base_y = (base[0][1] + base[1][1]) / 2
-    delta_x = tip_x - base_x
-    delta_y = tip_y - base_y
-    if abs(delta_x) >= abs(delta_y):
-        return "right" if delta_x > 0 else "left"
-    return "bottom" if delta_y > 0 else "top"
+    return {
+        "points": [{"x": vertex[0], "y": vertex[1]} for vertex in vertices],
+        "side": side,
+        "x": tip_x,
+        "y": tip_y,
+    }
+
+
+def _triangle_side_from_path(path):
+    geometry = _triangle_geometry_from_path(path)
+    return None if geometry is None else geometry["side"]
+
+
+def _triangle_hull_points(parts):
+    points = [point for part in parts for point in part.get("points") or []]
+    if len(points) < 3:
+        return None
+    xs = [float(point.get("x") or 0) for point in points]
+    ys = [float(point.get("y") or 0) for point in points]
+    tolerance = max(max(max(xs) - min(xs), max(ys) - min(ys)) * 0.03, 1e-6)
+    merged = []
+    for point in points:
+        x = float(point.get("x") or 0)
+        y = float(point.get("y") or 0)
+        match = next(
+            (
+                existing
+                for existing in merged
+                if math.hypot(x - existing["x"], y - existing["y"]) <= tolerance
+            ),
+            None,
+        )
+        if match is None:
+            merged.append({"x": x, "y": y, "count": 1})
+        else:
+            count = int(match["count"])
+            match["x"] = (match["x"] * count + x) / (count + 1)
+            match["y"] = (match["y"] * count + y) / (count + 1)
+            match["count"] = count + 1
+    hull = _convex_hull(merged)
+    if len(hull) == 3:
+        return hull
+
+    # ODA often splits one filled arrow into upper/lower halves whose tip
+    # coordinates differ by a hair.  The convex hull then has a tiny fourth
+    # corner.  Rebuild a clean left/right silhouette from the combined bounds
+    # so the tip sits on the shared mid-height of the full arrow.
+    sides = {
+        side
+        for part in parts
+        if (side := _triangle_side_from_path(part)) in {"left", "right"}
+    }
+    if len(sides) != 1 or len(parts) < 2:
+        return None
+    left_x, right_x = min(xs), max(xs)
+    top_y, bottom_y = min(ys), max(ys)
+    middle_y = (top_y + bottom_y) / 2
+    side = next(iter(sides))
+    if side == "left":
+        return [
+            {"x": right_x, "y": top_y},
+            {"x": left_x, "y": middle_y},
+            {"x": right_x, "y": bottom_y},
+        ]
+    return [
+        {"x": left_x, "y": top_y},
+        {"x": right_x, "y": middle_y},
+        {"x": left_x, "y": bottom_y},
+    ]
+
+
+def _triangle_geometry_from_parts(parts):
+    """Resolve tip/side after joining ODA-exported hatch halves of one arrow."""
+    hull = _triangle_hull_points(parts)
+    if hull is None:
+        return None
+    return _triangle_geometry_from_path({"points": hull})
+
+
+def _triangle_side_from_parts(parts):
+    """Resolve a CAD arrow direction after joining its exported hatch halves.
+
+    ODA commonly expands one filled triangle into two adjacent HATCH paths.
+    Each half is itself a small left/right triangle, so inspecting the first
+    half reports the wrong direction for vertical arrows.  The convex hull of
+    all touching halves restores the original three-point silhouette.
+    """
+    geometry = _triangle_geometry_from_parts(parts)
+    return None if geometry is None else geometry["side"]
+
+
+def _is_connector_identifier_label(value):
+    """SC1/SC2-style names label a connector box; they are not tip callouts."""
+    compact = re.sub(r"\s+", "", str(value or "")).upper()
+    if re.fullmatch(r"SC\d{1,3}", compact):
+        return True
+    # Bank ranges such as SC3-SC5 also sit above connector boxes.
+    return bool(re.fullmatch(r"SC\d{1,3}(?:-|－|—|~|～|至)(?:SC)?\d{1,3}", compact))
 
 
 def _marker_target_from_text(text, paths):
     """将编号文字吸附到附近的小型填充标记；找不到时保留文字坐标。"""
     text_x = float(text.get("x") or 0)
     text_y = float(text.get("y") or 0)
+    # Connector identifiers (SC1/SC2) sit above their equipment box.  Snapping
+    # them onto a nearby filled triangle invents a free arrow that the DWG
+    # never drew beside the label.
+    if _is_connector_identifier_label(text.get("text") or text.get("name")):
+        target = _item_target(text, "text")
+        target["markerLabel"] = _compact_marker_text(text.get("text"))
+        return target
     # Range labels (D100-D101) are often printed to the left of a vertical
     # equipment bank, so their original CAD arrow is farther away than a
     # regular single-point label.  A single label can also sit just outside a
@@ -2055,9 +2248,29 @@ def _marker_target_from_text(text, paths):
         side = "bottom" if delta_y < 0 else "top"
     # Prefer the triangle's physical tip.  The relative label position is
     # retained as a fallback for non-triangular markers and composite symbols.
-    if triangle_side:
-        side = triangle_side
-    _separate_overlapping_marker_label(text, combined_box, delta_x, delta_y)
+    geometry = _triangle_geometry_from_parts(marker_parts) or next(
+        (
+            resolved
+            for part in marker_parts
+            if (resolved := _triangle_geometry_from_path(part))
+        ),
+        None,
+    )
+    if geometry:
+        side = geometry["side"]
+        anchor_x = float(geometry["x"])
+        anchor_y = float(geometry["y"])
+        source_triangle_points = list(geometry["points"])
+    else:
+        if triangle_side:
+            side = triangle_side
+        anchor_x = center_x
+        anchor_y = center_y
+        source_triangle_points = None
+    # Do not push the CAD number away from its arrow.  Existing-report import
+    # hides that number and redraws it from the tip/side, so mutating text.x/y
+    # only makes the overlay label drift (especially for vertical stacks like
+    # 41/42).
     if side in {"top", "bottom"}:
         size = (combined_box["width"] / 18 + combined_box["height"] / 14) / 2
     else:
@@ -2075,10 +2288,10 @@ def _marker_target_from_text(text, paths):
         [int(part.get("id")) for part in marker_parts if part.get("id") is not None]
         + ([int(text.get("id"))] if text.get("id") is not None else [])
     ))
-    return {
+    target = {
         "markerLabel": _compact_marker_text(text.get("text")),
-        "x": center_x,
-        "y": center_y,
+        "x": anchor_x,
+        "y": anchor_y,
         "sourceElementIds": source_element_ids,
         "sourceHandles": handles,
         "id": text.get("id"),
@@ -2086,6 +2299,9 @@ def _marker_target_from_text(text, paths):
         "side": side,
         "size": size,
     }
+    if source_triangle_points:
+        target["sourceTrianglePoints"] = source_triangle_points
+    return target
 
 
 def _marker_text_visual_box(text):
@@ -2332,6 +2548,7 @@ def finalize_existing_report_workspace(workspace, image_data_url=None, image_fil
     paths = _remove_title_block_fill_artifacts(paths, chrome_regions["titleBlock"])
     _normalize_north_labels(texts, paths, width, height)
     _fit_cad_text_to_enclosing_boxes(texts, paths)
+    _fit_compact_identifier_texts_to_enclosing_boxes(texts, paths)
     _separate_connector_identifier_labels(texts, paths)
     _anchor_room_labels_to_enclosing_boxes(texts, paths)
     readonly_regions = {
@@ -3161,6 +3378,82 @@ def _fit_cad_text_to_enclosing_boxes(texts, paths):
         item["height"] = fitted_height
 
 
+def _fit_compact_identifier_texts_to_enclosing_boxes(texts, paths):
+    """Center equipment tags such as AT-1101 inside their nameplate boxes.
+
+    Keeping these labels on one line avoids a stacked digit, but the CAD insert
+    point is often the MTEXT top-left corner.  Without the recorded glyph
+    outlines the browser text then looks tiny and top-left aligned.  Match the
+    AutoCAD nameplate look by sizing the tag to the enclosing rectangle and
+    anchoring it at the box centre.
+    """
+    rectangles = []
+    for path in paths:
+        if not path.get("closed"):
+            continue
+        box = _path_box(path)
+        if 8 <= box["width"] <= 220 and 8 <= box["height"] <= 110:
+            rectangles.append(box)
+    if not rectangles:
+        return
+
+    for item in texts:
+        label = str(item.get("text") or item.get("name") or "").strip()
+        # Only in-box equipment codes (AT-110 / AT-1101).  Do not recenter
+        # connector labels, bank ranges or short markers onto nearby boxes.
+        if not _is_equipment_nameplate_label(label):
+            continue
+        if abs(float(item.get("rotation") or 0) % 180) > 0.01:
+            continue
+
+        bounds = item.get("glyphBounds") or {}
+        glyph_width = float(bounds.get("width") or 0)
+        glyph_height = float(bounds.get("height") or 0)
+        if glyph_width > 0 and glyph_height > 0:
+            center_x = float(item.get("x") or 0) + float(bounds.get("x") or 0) + glyph_width / 2
+            center_y = float(item.get("y") or 0) + float(bounds.get("y") or 0) + glyph_height / 2
+        else:
+            text_box = _item_box(item)
+            center_x = text_box["x"] + text_box["width"] / 2
+            center_y = text_box["y"] + text_box["height"] / 2
+
+        candidates = [
+            box for box in rectangles
+            if box["x"] - 2 <= center_x <= box["x"] + box["width"] + 2
+            and box["y"] - 2 <= center_y <= box["y"] + box["height"] + 2
+        ]
+        if not candidates:
+            continue
+        target = min(candidates, key=lambda box: box["width"] * box["height"])
+        width_factor = max(abs(float(item.get("widthFactor") or 1)), 0.01)
+        target_width = target["width"] * 0.9
+        target_height = target["height"] * 0.78
+        display_label = re.sub(r"\s+", " ", label).strip()
+        font_by_height = target_height
+        font_by_width = target_width / max(len(display_label) * 0.5 * width_factor, 0.01)
+        font_size = max(min(font_by_height, font_by_width), 4)
+
+        # Prefer the CAD glyph silhouette when it already fills the nameplate.
+        if (
+            item.get("glyphPaths")
+            and glyph_width >= target_width * 0.82
+            and glyph_height >= target_height * 0.82
+        ):
+            continue
+
+        item["fontSize"] = font_size
+        item["width"] = target_width
+        item["height"] = target_height
+        item["textAnchor"] = "middle"
+        item["dominantBaseline"] = "central"
+        item["x"] = target["x"] + target["width"] / 2
+        item["y"] = target["y"] + target["height"] / 2
+        item["cadRender"] = True
+        item.pop("glyphPaths", None)
+        item.pop("glyphBounds", None)
+        item.pop("glyphFillRule", None)
+
+
 def _separate_connector_identifier_labels(texts, paths):
     """Keep SC1/SC2 connector names above, rather than inside, their boxes."""
     rectangles = [
@@ -3172,7 +3465,10 @@ def _separate_connector_identifier_labels(texts, paths):
     ]
     for item in texts:
         value = re.sub(r"\s+", "", str(item.get("text") or item.get("name") or "")).upper()
-        if not re.fullmatch(r"SC\d{1,3}", value):
+        if not (
+            re.fullmatch(r"SC\d{1,3}", value)
+            or re.fullmatch(r"SC\d{1,3}(?:-|－|—|~|～|至)(?:SC)?\d{1,3}", value)
+        ):
             continue
         text_box = _item_box(item)
         text_center_x = text_box["x"] + text_box["width"] / 2
