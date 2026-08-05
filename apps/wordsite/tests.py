@@ -28,6 +28,8 @@ from apps.wordsite.scripts.parse_dwg_workspace import (
     _is_orphan_legend_swatch,
     _match_marker_text,
     _marker_target_from_text,
+    _marker_is_in_text_range,
+    _parse_marker_range,
     _marker_text_visual_box,
     _merge_legend_hatch_parts,
     _report_fields,
@@ -46,6 +48,11 @@ from apps.wordsite.scripts.parse_dwg_workspace import (
 
 # DWG/DXF 工作区解析测试：验证图纸文字与检测表记录共享 id，并保留未匹配记录。
 class DwgWorkspaceParserTests(SimpleTestCase):
+    def test_sc_prefixed_marker_ranges_keep_spd_and_spd_test_points_separate(self):
+        self.assertEqual(_parse_marker_range("SC3-SC5"), ["SC3", "SC4", "SC5"])
+        self.assertTrue(_marker_is_in_text_range("SC4", "SC3-SC5"))
+        self.assertFalse(_marker_is_in_text_range("S4", "SC3-SC5"))
+
     def test_formats_detection_type_with_one_selected_option(self):
         self.assertEqual(format_detection_type("验收检测"), "☑验收检测  □定期检测")
         self.assertEqual(format_detection_type("定期检测"), "□验收检测  ☑定期检测")

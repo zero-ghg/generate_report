@@ -1110,6 +1110,9 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
                 "x": target["x"],
                 "y": target["y"],
                 "binding": existing_binding or target_binding,
+                "cadSourceVisible": bool(target.get("cadSourceVisible")),
+                "labelX": target.get("labelX"),
+                "labelY": target.get("labelY"),
                 "id": row_id,
                 "reportFields": fields,
                 "reportType": report_type,
@@ -1160,9 +1163,12 @@ def _bind_report_rows(parsed, report_tables, existing_points, old_width, old_hei
 
 
 def _parse_marker_range(value):
-    """Return every marker in a compact CAD range, e.g. D1-30 or D1-D30."""
+    """Return every marker in a compact CAD range, e.g. D1-30 or SC1-SC3."""
     compact = re.sub(r"\s+", "", str(value or "")).upper()
-    match = re.fullmatch(r"([A-Z]?)(\d+)(?:-|－|—|~|～|至)([A-Z]?)(\d+)", compact)
+    # Prefixes are not limited to one character: SPD drawings commonly use
+    # ``SC1-SC5`` alongside the ordinary ``S1-S5`` range.  Treat the full
+    # prefix as semantic so both groups remain independent test points.
+    match = re.fullmatch(r"([A-Z]*)(\d+)(?:-|－|—|~|～|至)([A-Z]*)(\d+)", compact)
     if not match:
         return None
     start_prefix, start_text, end_prefix, end_text = match.groups()
@@ -1725,12 +1731,12 @@ def _select_marker_target(candidates, row, paths, texts):
 
 
 def _marker_is_in_text_range(marker, text_value):
-    """Match one report marker against a CAD range label such as D55~D56."""
-    marker_match = re.fullmatch(r"([A-Z]?)(\d+)", marker)
+    """Match one report marker against a CAD range label such as SC3~SC5."""
+    marker_match = re.fullmatch(r"([A-Z]*)(\d+)", marker)
     # DXF text is often split onto separate lines.  Once whitespace is
     # removed, a visible range such as ``D1\n-D\n12`` becomes ``D1-D12``.
     # Treat its hyphen as the range separator as well as the CAD tilde forms.
-    range_match = re.fullmatch(r"([A-Z]?)(\d+)(?:~|～|-)([A-Z]?)(\d+)", text_value)
+    range_match = re.fullmatch(r"([A-Z]*)(\d+)(?:~|～|-)([A-Z]*)(\d+)", text_value)
     if not marker_match or not range_match:
         return False
     marker_prefix, marker_number = marker_match.group(1), int(marker_match.group(2))
@@ -1765,6 +1771,31 @@ def _triangle_side_from_path(path):
             vertices.append(vertex)
     if len(vertices) > 1 and math.hypot(vertices[0][0] - vertices[-1][0], vertices[0][1] - vertices[-1][1]) <= merge_distance:
         vertices.pop()
+    # HATCH boundaries frequently retain an extra point in the middle of a
+    # triangle's straight base (A → base-centre → B).  It is still a normal
+    # solid arrow, but without removing that collinear point it looks like a
+    # four-sided polygon and is skipped by the marker matcher.
+    collinear_tolerance = max(extent * 1e-4, 1e-6)
+    changed = True
+    while changed and len(vertices) > 3:
+        changed = False
+        for index, current in enumerate(vertices):
+            previous = vertices[(index - 1) % len(vertices)]
+            following = vertices[(index + 1) % len(vertices)]
+            first_length = math.hypot(current[0] - previous[0], current[1] - previous[1])
+            second_length = math.hypot(following[0] - current[0], following[1] - current[1])
+            if first_length <= collinear_tolerance or second_length <= collinear_tolerance:
+                vertices.pop(index)
+                changed = True
+                break
+            cross = abs(
+                (current[0] - previous[0]) * (following[1] - current[1])
+                - (current[1] - previous[1]) * (following[0] - current[0])
+            )
+            if cross <= collinear_tolerance * (first_length + second_length):
+                vertices.pop(index)
+                changed = True
+                break
     if len(vertices) != 3:
         return None
 
@@ -1902,6 +1933,92 @@ def _marker_target_from_text(text, paths):
             marker_ids.add(path_id)
             combined_box = _union_boxes(combined_box, path_box)
 
+    triangle_side = next(
+        (resolved for part in marker_parts if (resolved := _triangle_side_from_path(part))),
+        None,
+    )
+
+    # CAD arrowheads are often encoded as a filled HATCH plus four short
+    # outline segments.  The HATCH is enough to recognise the marker, but the
+    # outline segments must share its interaction group as well; otherwise a
+    # dragged test point leaves a ghost arrow behind.  Keep only line segments
+    # wholly contained by the arrow's box, never the adjacent pipeline line.
+    arrow_box_tolerance = max(min(combined_box["width"], combined_box["height"]) * 0.12, 0.5)
+    for path in paths:
+        path_id = int(path.get("id") or 0)
+        points = path.get("points") or []
+        if (
+            path_id in marker_ids
+            or str(path.get("name") or "").upper() not in {"LINE", "LWPOLYLINE"}
+            or path.get("closed")
+            or len(points) < 2
+        ):
+            continue
+        if all(
+            combined_box["x"] - arrow_box_tolerance <= float(point.get("x") or 0) <= combined_box["x"] + combined_box["width"] + arrow_box_tolerance
+            and combined_box["y"] - arrow_box_tolerance <= float(point.get("y") or 0) <= combined_box["y"] + combined_box["height"] + arrow_box_tolerance
+            for point in points
+        ):
+            marker_parts.append(path)
+            marker_ids.add(path_id)
+
+    # A detection callout can be drawn as “lead line + triangular arrow”.
+    # Once the unclaimed arrow has been selected, retain the short collinear
+    # lead line(s) as part of the same marker interaction group.  Stop before
+    # a line reaches another triangle so neighbouring test points never get
+    # merged or claimed by this fallback.
+    lead_box = dict(combined_box)
+    lead_axis_tolerance = max(min(lead_box["width"], lead_box["height"]) * 0.55, 1.0)
+    max_lead_length = max(48.0, max(lead_box["width"], lead_box["height"]) * 8)
+    for _ in range(4):
+        added = False
+        for path in paths:
+            path_id = int(path.get("id") or 0)
+            points = path.get("points") or []
+            if (
+                path_id in marker_ids
+                or str(path.get("name") or "").upper() != "LINE"
+                or path.get("closed")
+                or len(points) != 2
+            ):
+                continue
+            start = {"x": float(points[0].get("x") or 0), "y": float(points[0].get("y") or 0)}
+            end = {"x": float(points[1].get("x") or 0), "y": float(points[1].get("y") or 0)}
+            length = math.hypot(end["x"] - start["x"], end["y"] - start["y"])
+            if length > max_lead_length:
+                continue
+            is_horizontal = abs(end["y"] - start["y"]) <= lead_axis_tolerance
+            is_vertical = abs(end["x"] - start["x"]) <= lead_axis_tolerance
+            if triangle_side in {"left", "right"} and not is_horizontal:
+                continue
+            if triangle_side in {"top", "bottom"} and not is_vertical:
+                continue
+            if not _boxes_touch(lead_box, _path_box(path), lead_axis_tolerance):
+                continue
+            # Do not walk from this callout into the next marker through a
+            # shared horizontal/vertical CAD line.
+            reaches_foreign_triangle = False
+            for other in paths:
+                other_id = int(other.get("id") or 0)
+                if other_id in marker_ids or not other.get("closed") or _triangle_side_from_path(other) is None:
+                    continue
+                other_box = _path_box(other)
+                if any(
+                    other_box["x"] - lead_axis_tolerance <= point["x"] <= other_box["x"] + other_box["width"] + lead_axis_tolerance
+                    and other_box["y"] - lead_axis_tolerance <= point["y"] <= other_box["y"] + other_box["height"] + lead_axis_tolerance
+                    for point in (start, end)
+                ):
+                    reaches_foreign_triangle = True
+                    break
+            if reaches_foreign_triangle:
+                continue
+            marker_parts.append(path)
+            marker_ids.add(path_id)
+            lead_box = _union_boxes(lead_box, _path_box(path))
+            added = True
+        if not added:
+            break
+
     center_x = combined_box["x"] + combined_box["width"] / 2
     center_y = combined_box["y"] + combined_box["height"] / 2
     delta_x = text_x - center_x
@@ -1912,10 +2029,6 @@ def _marker_target_from_text(text, paths):
         side = "bottom" if delta_y < 0 else "top"
     # Prefer the triangle's physical tip.  The relative label position is
     # retained as a fallback for non-triangular markers and composite symbols.
-    triangle_side = next(
-        (resolved for part in marker_parts if (resolved := _triangle_side_from_path(part))),
-        None,
-    )
     if triangle_side:
         side = triangle_side
     _separate_overlapping_marker_label(text, combined_box, delta_x, delta_y)
@@ -2123,7 +2236,7 @@ def _normalize_marker(value):
     ``_marker_is_in_text_range``.
     """
     compact = _compact_marker_text(value)
-    match = re.fullmatch(r"([A-Z]?)(\d+)", compact)
+    match = re.fullmatch(r"([A-Z]*)(\d+)", compact)
     if not match:
         return compact
     prefix, number = match.groups()
@@ -2156,7 +2269,9 @@ def finalize_existing_report_workspace(workspace, image_data_url=None, image_fil
             if str(item.get("interactionGroupId") or "") in marker_group_ids:
                 item["testPointSource"] = True
     for point in test_points:
-        point["cadSourceVisible"] = bool(point.get("interactionGroupId"))
+        point["cadSourceVisible"] = bool(
+            point.get("cadSourceVisible") or point.get("interactionGroupId")
+        )
         source_marker = _compact_marker_text(point.get("sourceMarker"))
         display_marker = _compact_marker_text(point.get("label"))
         if not source_marker or source_marker == display_marker:
