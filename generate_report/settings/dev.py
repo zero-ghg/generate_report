@@ -88,13 +88,16 @@ WSGI_APPLICATION = 'generate_report.wsgi.application'
 # https://docs.djangoproject.com/en/3.1/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.environ.get('MYSQL_DATABASE', 'generate_report'),
-        'USER': os.environ.get('MYSQL_USER', 'root'),
-        'PASSWORD': os.environ.get('MYSQL_PASSWORD', '123456'),
-        'HOST': os.environ.get('MYSQL_HOST', '127.0.0.1'),
-        'PORT': os.environ.get('MYSQL_PORT', '3306'),
+    "default": {
+        "ENGINE": "django.db.backends.mysql",
+        "NAME": "generate_report",
+        "USER": "root",
+        "PASSWORD": "dlkj2023..",
+        "HOST": "49.232.57.207",
+        "PORT": "30003",
+        "OPTIONS": {
+            "charset": "utf8mb4",
+        },
     }
 }
 

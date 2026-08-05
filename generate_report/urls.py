@@ -4,10 +4,10 @@ from django.urls import path, include
 from rest_framework_simplejwt.views import token_refresh
 
 urlpatterns = [
-    path('api/v1/', include('users.urls')),
-    path('api/v1/projects/', include('projects.urls')),
-    path('api/v1/legends/', include('legends.urls')),
-    path('api/v1/wordsite/', include('wordsite.urls')),
+    path('api/v1/', include('apps.users.urls')),
+    path('api/v1/projects/', include('apps.projects.urls')),
+    path('api/v1/legends/', include('apps.legends.urls')),
+    path('api/v1/wordsite/', include('apps.wordsite.urls')),
     path('api/v1/refresh/', token_refresh),
 ]
 

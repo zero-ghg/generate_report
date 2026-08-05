@@ -25,6 +25,7 @@ from apps.wordsite.scripts.parse_dwg_workspace import (
     _cad_glyph_outlines_complete,
     _collapse_paired_flange_test_points,
     _fit_cad_text_to_enclosing_boxes,
+    _fit_compact_identifier_texts_to_enclosing_boxes,
     _is_orphan_legend_swatch,
     _match_marker_text,
     _marker_target_from_text,
@@ -38,6 +39,7 @@ from apps.wordsite.scripts.parse_dwg_workspace import (
     _separate_connector_identifier_labels,
     _separate_overlapping_marker_label,
     _triangle_side_from_path,
+    _triangle_side_from_parts,
     _wrapped_cad_text,
     finalize_existing_report_workspace,
     parse_dwg_workspace,
@@ -75,7 +77,67 @@ class DwgWorkspaceParserTests(SimpleTestCase):
 
         self.assertEqual(target["sourceElementIds"], [1, 2, 10])
         self.assertEqual(target["side"], "right")
+        # Anchor at the physical tip, not the bounding-box centre.
+        self.assertEqual(target["x"], 42)
+        self.assertEqual(target["y"], 8)
+        self.assertEqual(len(target["sourceTrianglePoints"]), 3)
 
+    def test_marker_target_does_not_push_cad_label_away_from_arrow(self):
+        text = {
+            "id": 10,
+            "text": "41",
+            "x": 10,
+            "y": 20,
+            "width": 8,
+            "height": 6,
+            "importedSourceHandles": ["TEXT"],
+        }
+        paths = [
+            {
+                "id": 1,
+                "name": "HATCH",
+                "closed": True,
+                "importedSourceHandles": ["ARROW"],
+                "points": [{"x": 18, "y": 18}, {"x": 26, "y": 22}, {"x": 18, "y": 26}],
+            },
+        ]
+
+        target = _marker_target_from_text(text, paths)
+
+        self.assertEqual(text["x"], 10)
+        self.assertEqual(text["y"], 20)
+        self.assertEqual(target["side"], "right")
+        self.assertEqual(target["x"], 26)
+        self.assertEqual(target["y"], 22)
+
+    def test_connector_identifier_does_not_snap_onto_nearby_triangle(self):
+        """SC2 labels sit above a box; do not invent a free tip arrow beside them."""
+        text = {
+            "id": 10,
+            "text": "SC2",
+            "x": 100,
+            "y": 80,
+            "width": 24,
+            "height": 12,
+            "importedSourceHandles": ["TEXT"],
+        }
+        paths = [
+            {
+                "id": 1,
+                "name": "HATCH",
+                "closed": True,
+                "importedSourceHandles": ["ARROW"],
+                "points": [{"x": 118, "y": 96}, {"x": 130, "y": 100}, {"x": 118, "y": 104}],
+            },
+        ]
+
+        target = _marker_target_from_text(text, paths)
+
+        self.assertEqual(target["markerLabel"], "SC2")
+        self.assertEqual(target["x"], 100)
+        self.assertEqual(target["y"], 80)
+        self.assertNotIn("sourceTrianglePoints", target)
+        self.assertEqual(target["sourceElementIds"], [10])
     def test_exports_each_child_drawing_as_a_separate_legend_canvas(self):
         legend = {
             "boardHeight": 600,
@@ -189,6 +251,38 @@ class DwgWorkspaceParserTests(SimpleTestCase):
 
         self.assertEqual(_triangle_side_from_path(path), "left")
 
+    def test_uses_combined_hatch_silhouette_for_vertical_marker(self):
+        parts = [
+            {
+                "points": [
+                    {"x": 0, "y": 0},
+                    {"x": 5, "y": 10},
+                    {"x": 5, "y": 0},
+                    {"x": 0, "y": 0},
+                ],
+            },
+            {
+                "points": [
+                    {"x": 5, "y": 0},
+                    {"x": 5, "y": 10},
+                    {"x": 10, "y": 0},
+                    {"x": 5, "y": 0},
+                ],
+            },
+        ]
+
+        self.assertEqual(_triangle_side_from_parts(parts), "bottom")
+
+    def test_does_not_wrap_compound_cad_identifiers(self):
+        item = {
+            "cadBoxWidth": 10,
+            "fontSize": 10,
+            "text": "S3-S5",
+            "widthFactor": 1,
+        }
+
+        self.assertEqual(_wrapped_cad_text(item), "S3-S5")
+
     def test_moves_sc_connector_identifier_above_its_box(self):
         texts = [{
             "fontSize": 10,
@@ -265,6 +359,28 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         }
 
         self.assertEqual(_wrapped_cad_text(item), "025")
+
+    def test_keeps_equipment_tag_with_hyphen_on_one_line(self):
+        item = {
+            "cadBoxWidth": 8,
+            "fontSize": 4,
+            "fontWeight": 400,
+            "text": "AT-110",
+            "widthFactor": 0.8,
+        }
+
+        self.assertEqual(_wrapped_cad_text(item), "AT-110")
+
+    def test_keeps_equipment_tag_with_suffix_number_on_one_line(self):
+        item = {
+            "cadBoxWidth": 10,
+            "fontSize": 4,
+            "fontWeight": 400,
+            "text": "AT-110 1",
+            "widthFactor": 0.8,
+        }
+
+        self.assertEqual(_wrapped_cad_text(item), "AT-110 1")
 
     def test_rejects_partial_cad_glyph_outlines(self):
         item = {
@@ -1370,6 +1486,80 @@ class DwgWorkspaceParserTests(SimpleTestCase):
         self.assertLessEqual(bounds["width"], 60 * 0.86 + 0.001)
         self.assertLessEqual(bounds["height"], 34 * 0.82 + 0.001)
         self.assertAlmostEqual(texts[0]["x"] + bounds["x"] + bounds["width"] / 2, 38)
+
+    def test_centers_compact_equipment_tag_inside_enclosing_box(self):
+        texts = [{
+            "dominantBaseline": "hanging",
+            "fontSize": 6,
+            "height": 8,
+            "text": "AT-110 1",
+            "textAnchor": "start",
+            "width": 40,
+            "widthFactor": 1,
+            "x": 12,
+            "y": 14,
+        }]
+        paths = [{
+            "closed": True,
+            "points": [
+                {"x": 10, "y": 10}, {"x": 90, "y": 10},
+                {"x": 90, "y": 40}, {"x": 10, "y": 40},
+            ],
+        }]
+
+        _fit_compact_identifier_texts_to_enclosing_boxes(texts, paths)
+
+        self.assertEqual(texts[0]["textAnchor"], "middle")
+        self.assertEqual(texts[0]["dominantBaseline"], "central")
+        self.assertAlmostEqual(texts[0]["x"], 50)
+        self.assertAlmostEqual(texts[0]["y"], 25)
+        self.assertGreaterEqual(texts[0]["fontSize"], 18)
+        self.assertNotIn("glyphPaths", texts[0])
+
+    def test_does_not_recenter_short_connector_or_bank_labels(self):
+        texts = [
+            {
+                "fontSize": 8,
+                "height": 10,
+                "text": "SC5",
+                "textAnchor": "start",
+                "width": 20,
+                "x": 100,
+                "y": 20,
+            },
+            {
+                "fontSize": 8,
+                "height": 10,
+                "text": "S03",
+                "textAnchor": "start",
+                "width": 20,
+                "x": 140,
+                "y": 22,
+            },
+            {
+                "fontSize": 8,
+                "height": 10,
+                "text": "S3-S5",
+                "textAnchor": "start",
+                "width": 30,
+                "x": 180,
+                "y": 18,
+            },
+        ]
+        paths = [{
+            "closed": True,
+            "points": [
+                {"x": 90, "y": 10}, {"x": 220, "y": 10},
+                {"x": 220, "y": 50}, {"x": 90, "y": 50},
+            ],
+        }]
+
+        _fit_compact_identifier_texts_to_enclosing_boxes(texts, paths)
+
+        self.assertEqual(texts[0]["x"], 100)
+        self.assertEqual(texts[1]["x"], 140)
+        self.assertEqual(texts[2]["x"], 180)
+        self.assertEqual(texts[0]["textAnchor"], "start")
 
     def _dxf_bytes(self):
         document = ezdxf.new("R2018")
